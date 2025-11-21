@@ -13,7 +13,7 @@ This canister implements a "dead man switch" mechanism for Bitcoin funds on ICP 
 - **Automatic Transfer**: Funds automatically transfer to beneficiary on timeout
 - **ckBTC Integration**: Full ICRC-1 standard integration with ckBTC ledger
 - **Periodic Checking**: Automatic timeout checking every 60 seconds
-- **Testnet Ready**: Configured for ICP testnet deployment
+- **Local Development**: Configured for local dfx network testing
 
 ## Architecture
 
@@ -35,7 +35,14 @@ This canister implements a "dead man switch" mechanism for Bitcoin funds on ICP 
 
 - [DFX SDK](https://internetcomputer.org/docs/current/developer-docs/setup/install/) installed
 - Rust toolchain with `wasm32-unknown-unknown` target
-- Access to ICP testnet
+
+### About ICP Development and Testing
+
+**Important**: The Internet Computer does not have a public testnet like Sepolia for Ethereum. To develop and test applications, you deploy them to a **local network** that you can run with `dfx`. This local replica simulates the Internet Computer network for development purposes.
+
+**Mainnet Deployment**: If you want to deploy your application to mainnet, you need **cycles** to pay for it. Cycles are the fuel that powers canister execution on the Internet Computer.
+
+**Canister Smart Contracts**: Canister smart contracts on the Internet Computer contain **Wasm bytecode**. This allows for writing smart contracts in many different programming languages. This project uses Rust, but you can also use Motoko, TypeScript, Python, and other languages that compile to WebAssembly.
 
 ### Installation
 
@@ -53,24 +60,43 @@ dfx build
 
 ## Deployment
 
-### Testnet Deployment
+### Local Development Deployment
+
+The Internet Computer uses a **local network** for development and testing (unlike Ethereum's public testnets). Deploy to your local dfx network:
 
 ```bash
-# Set network to testnet
-dfx network use testnet
+# Start local replica (if not already running)
+dfx start --background
 
-# Deploy the canister
-dfx deploy --network testnet
+# Deploy to local network
+dfx deploy
 
 # Note the canister ID from the output
 ```
 
+### Mainnet Deployment
+
+To deploy to mainnet, you need **cycles** to pay for canister execution:
+
+```bash
+# Set network to mainnet
+dfx network use ic
+
+# Deploy the canister (requires cycles)
+dfx deploy --network ic
+
+# Note: You'll need cycles in your wallet to deploy
+```
+
 ### Update ckBTC Ledger Canister ID
 
-Update the `CKBTC_LEDGER_CANISTER_ID` constant in `deadman_switch/src/lib.rs` with the actual testnet ckBTC ledger canister ID:
+Update the `CKBTC_LEDGER_CANISTER_ID` constant in `deadman_switch/src/lib.rs` with the appropriate ckBTC ledger canister ID:
+
+- **Local**: Use a mock or local ledger canister ID
+- **Mainnet**: Use the mainnet ckBTC ledger canister ID
 
 ```rust
-const CKBTC_LEDGER_CANISTER_ID: &str = "your-testnet-ckbtc-ledger-id";
+const CKBTC_LEDGER_CANISTER_ID: &str = "your-ckbtc-ledger-id";
 ```
 
 ## Usage
@@ -153,11 +179,17 @@ dfx canister call deadman_switch get_ckbtc_balance
 
 ### Building
 
+The canister is compiled to **WebAssembly (Wasm) bytecode**, which is what runs on the Internet Computer:
+
 ```bash
 dfx build
 ```
 
+This compiles the Rust code to Wasm bytecode that can be deployed as a canister smart contract.
+
 ### Testing Locally
+
+Since ICP doesn't have a public testnet, all development and testing happens on a **local dfx network**:
 
 ```bash
 # Start local replica
@@ -169,6 +201,8 @@ dfx deploy
 # Test functions
 dfx canister call deadman_switch greet '("World")'
 ```
+
+The local replica simulates the Internet Computer network, allowing you to test your canister without deploying to mainnet or spending cycles.
 
 ### Logging
 
@@ -193,10 +227,12 @@ icp-btc-cursor/
 ├── deadman_switch/
 │   ├── Cargo.toml          # Canister dependencies
 │   └── src/
-│       ├── lib.rs          # Main canister code
+│       ├── lib.rs          # Main canister code (Rust -> Wasm)
 │       └── deadman_switch.did  # Candid interface
-├── README.md               # This file
-└── workflow.md             # Development workflow
+├── frontend/               # Frontend application
+├── examples/               # Usage examples
+├── DEPLOYMENT.md           # Deployment guide
+└── README.md               # This file
 ```
 
 ## Hackathon Submission
