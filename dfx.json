@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "canisters": {
+    "deadman_switch": {
+      "type": "rust",
+      "package": "deadman_switch",
+      "candid": "deadman_switch/src/deadman_switch.did",
+      "build": "cargo build --target wasm32-unknown-unknown --package deadman_switch --release",
+      "wasm": "target/wasm32-unknown-unknown/release/deadman_switch.wasm"
+    }
+  },
+  "networks": {
+    "testnet": {
+      "providers": ["https://testnet.dfinity.network"],
+      "type": "persistent"
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": ""
+    }
+  }
+}
+
