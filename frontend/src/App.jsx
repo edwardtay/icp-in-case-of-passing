@@ -10,11 +10,9 @@ import {
 import { getAllTokenBalances, formatTokenBalance, TOKEN_CANISTERS } from './wallet-assets';
 import { HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
-import TestPage from './TestPage';
 import './App.css';
 
 function App() {
-  const [showTestPage, setShowTestPage] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [principal, setPrincipal] = useState(null);
   const [accountInfo, setAccountInfo] = useState(null);
@@ -994,38 +992,12 @@ function App() {
   const extensionWallets = availableWallets.filter(w => w.id !== 'ii');
   const allWallets = Object.values(WALLETS);
 
-  // Show test page if toggled
-  if (showTestPage) {
-    return (
-      <div>
-        <div style={{ position: 'fixed', top: '20px', right: '20px', zIndex: 1000 }}>
-          <button
-            onClick={() => setShowTestPage(false)}
-            className="btn btn-primary"
-            style={{ padding: '8px 16px' }}
-          >
-            ← Back to App
-          </button>
-        </div>
-        <TestPage />
-      </div>
-    );
-  }
-
   return (
     <div className="app">
       <header className="app-header">
         <div className="header-title-container">
           <h1>🔐 ICP: In Case of Passing</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <button
-              onClick={() => setShowTestPage(true)}
-              className="btn-refresh-small"
-              title="Open Test Page"
-              style={{ padding: '6px 10px', fontSize: '0.85rem' }}
-            >
-              🧪 Test
-            </button>
             <div className="info-icon-container">
               <button
                 className="info-icon"
