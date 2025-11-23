@@ -31,21 +31,21 @@ export const TOKEN_CANISTERS = {
   // }
 };
 
-// Minimal ICRC-1 IDL for balance queries
-const createICRC1Idl = () => {
-  return ({ IDL }) => {
-    const Account = IDL.Record({
-      owner: IDL.Principal,
-      subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)),
-    });
-    
-    return IDL.Service({
-      icrc1_balance_of: IDL.Func([Account], [IDL.Nat], ['query']),
-      icrc1_decimals: IDL.Func([], [IDL.Nat8], ['query']),
-      icrc1_symbol: IDL.Func([], [IDL.Text], ['query']),
-      icrc1_name: IDL.Func([], [IDL.Text], ['query']),
-    });
-  };
+// Minimal ICRC-1 IDL for balance queries - using factory function to avoid global issues
+const createICRC1Idl = async () => {
+  // Import IDL dynamically to avoid "global is not defined" error
+  const { IDL } = await import('@dfinity/candid');
+  const Account = IDL.Record({
+    owner: IDL.Principal,
+    subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  
+  return IDL.Service({
+    icrc1_balance_of: IDL.Func([Account], [IDL.Nat], ['query']),
+    icrc1_decimals: IDL.Func([], [IDL.Nat8], ['query']),
+    icrc1_symbol: IDL.Func([], [IDL.Text], ['query']),
+    icrc1_name: IDL.Func([], [IDL.Text], ['query']),
+  });
 };
 
 /**
@@ -69,9 +69,11 @@ export async function getTokenBalance(principal, canisterId, tokenInfo, agent = 
     }
 
     const tokenCanister = Principal.fromText(canisterId);
-    const idlFactory = createICRC1Idl();
     
-    const actor = Actor.createActor(idlFactory, {
+    // Get IDL - import dynamically to avoid "global is not defined" error
+    const idl = await createICRC1Idl();
+    
+    const actor = Actor.createActor(idl, {
       agent,
       canisterId: tokenCanister,
     });

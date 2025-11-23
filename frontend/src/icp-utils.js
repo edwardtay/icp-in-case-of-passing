@@ -41,44 +41,35 @@ export async function validatePrincipal(principalText) {
 
 /**
  * Get explorer URLs for a principal with multiple fallback options
- * @param {string} principalText - The principal string
+ * @param {string} principalText - The principal string (also serves as account ID)
  * @returns {Array} - Array of explorer objects with name, url, and description
+ * 
+ * Note: In this system, the Principal IS the Account ID. Accounts are keyed by Principal
+ * in the canister's HashMap, so they are one and the same identifier.
  */
 export function getExplorerUrls(principalText) {
-  if (!principalText) return [];
+  if (!principalText) {
+    console.warn('getExplorerUrls: No principal provided');
+    return [];
+  }
 
   const encoded = encodeURIComponent(principalText);
   
-  return [
+  // Only include verified working explorers
+  // Removed non-existent explorers: ic.rocks, icscan.io, ic.dashboard.org
+  // Note: Explorers may not show principals without on-chain activity
+  const explorers = [
     {
       name: 'ICP Dashboard',
       url: `https://dashboard.internetcomputer.org/principal/${encoded}`,
       icon: '🌐',
       description: 'Official ICP Dashboard',
       primary: true
-    },
-    {
-      name: 'IC.rocks',
-      url: `https://ic.rocks/principal/${encoded}`,
-      icon: '🪨',
-      description: 'IC.rocks Explorer',
-      primary: false
-    },
-    {
-      name: 'ICScan',
-      url: `https://icscan.io/principal/${encoded}`,
-      icon: '🔍',
-      description: 'ICScan Explorer',
-      primary: false
-    },
-    {
-      name: 'IC Dashboard',
-      url: `https://ic.dashboard.org/principal/${encoded}`,
-      icon: '📊',
-      description: 'IC Dashboard',
-      primary: false
     }
   ];
+  
+  console.log(`Generated ${explorers.length} explorer URL(s) for principal:`, { principal: principalText, explorers });
+  return explorers;
 }
 
 /**

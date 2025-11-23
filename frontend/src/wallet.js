@@ -1,6 +1,15 @@
 // Wallet detection and connection utilities
 
 export const WALLETS = {
+  // OISY is recommended and listed first
+  OISY: {
+    id: 'oisy',
+    name: 'OISY',
+    icon: '🌊',
+    downloadUrl: 'https://www.oisy.com/',
+    check: () => typeof window !== 'undefined' && window.ic?.oisy,
+    recommended: true, // Mark as recommended
+  },
   PLUG: {
     id: 'plug',
     name: 'Plug',
@@ -14,13 +23,6 @@ export const WALLETS = {
     icon: '🛡️',
     downloadUrl: 'https://www.stoicwallet.com/',
     check: () => typeof window !== 'undefined' && window.ic?.stoic,
-  },
-  OISY: {
-    id: 'oisy',
-    name: 'OISY',
-    icon: '🌊',
-    downloadUrl: 'https://www.oisy.com/',
-    check: () => typeof window !== 'undefined' && window.ic?.oisy,
   },
   BITFINITY: {
     id: 'bitfinity',
@@ -41,13 +43,79 @@ export const WALLETS = {
 export function detectWallets() {
   const detected = [];
   
+  // Log what we're checking for debugging
+  console.log('Detecting ICP wallets...', {
+    hasWindow: typeof window !== 'undefined',
+    hasWindowIc: typeof window !== 'undefined' && !!window.ic,
+    windowIcKeys: typeof window !== 'undefined' && window.ic ? Object.keys(window.ic) : []
+  });
+  
   for (const [key, wallet] of Object.entries(WALLETS)) {
-    if (wallet.check()) {
+    const isAvailable = wallet.check();
+    if (isAvailable) {
+      console.log(`✓ ${wallet.name} detected`);
       detected.push(wallet);
+    } else {
+      console.log(`✗ ${wallet.name} not detected`);
     }
   }
   
+  console.log(`Detected ${detected.length} wallet(s):`, detected.map(w => w.name));
   return detected;
+}
+
+/**
+ * Set up wallet detection listeners (similar to EVM wallet detection)
+ * Listens for wallet injection events and polls periodically
+ */
+export function setupWalletDetection(callback) {
+  if (typeof window === 'undefined') return () => {};
+  
+  let lastDetectedCount = 0;
+  
+  // Initial detection
+  const detected = detectWallets();
+  lastDetectedCount = detected.length;
+  if (callback) callback(detected);
+  
+  // Poll for wallets periodically (wallets may inject after page load)
+  let pollCount = 0;
+  const maxPolls = 20; // Poll for 20 seconds
+  const pollInterval = setInterval(() => {
+    pollCount++;
+    const currentDetected = detectWallets();
+    
+    // If we detect new wallets or count changed, notify
+    if (currentDetected.length !== lastDetectedCount && callback) {
+      lastDetectedCount = currentDetected.length;
+      callback(currentDetected);
+      console.log('Wallet detection changed:', currentDetected.map(w => w.name));
+    }
+    
+    // Stop polling after max attempts
+    if (pollCount >= maxPolls) {
+      clearInterval(pollInterval);
+      console.log('Stopped polling for wallets after', maxPolls, 'seconds');
+    }
+  }, 1000);
+  
+  // Listen for focus events (user might have installed wallet in another tab)
+  const checkOnFocus = () => {
+    const currentDetected = detectWallets();
+    if (currentDetected.length !== lastDetectedCount && callback) {
+      lastDetectedCount = currentDetected.length;
+      callback(currentDetected);
+      console.log('Wallet detection updated on focus:', currentDetected.map(w => w.name));
+    }
+  };
+  
+  window.addEventListener('focus', checkOnFocus);
+  
+  // Return cleanup function
+  return () => {
+    clearInterval(pollInterval);
+    window.removeEventListener('focus', checkOnFocus);
+  };
 }
 
 export async function connectPlug() {
@@ -114,9 +182,20 @@ export async function connectOISY() {
       const principal = window.ic.oisy.principalId;
       const identity = window.ic.oisy.agent.getIdentity();
       
+      // Log OISY wallet info for debugging
+      console.log('OISY Wallet Connected:', {
+        principal: typeof principal === 'string' ? principal : principal?.toText?.(),
+        hasAgent: !!window.ic.oisy.agent,
+        walletType: 'oisy',
+        // Additional OISY info if available
+        version: window.ic.oisy.version || 'unknown'
+      });
+      
       return {
-        principal: principal,
+        principal: typeof principal === 'string' ? principal : principal?.toText?.(),
         identity: identity,
+        // Include agent for additional API calls
+        agent: window.ic.oisy.agent,
       };
     }
     throw new Error('OISY connection cancelled');

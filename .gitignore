@@ -22,11 +22,32 @@ Thumbs.db
 
 # Logs
 *.log
+*.log.*
 
 # Environment
 .env
 .env.local
+.env.*.local
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
 
 # Personal/Private files (not for GitHub)
 private/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*~
 

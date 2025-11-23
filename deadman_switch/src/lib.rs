@@ -3,9 +3,9 @@ use ic_cdk::{api::time, init, post_upgrade, pre_upgrade, query, update};
 use ic_cdk_timers::set_timer_interval;
 use icrc_ledger_types::{
     icrc1::account::Account,
-    icrc1::transfer::{TransferArg, TransferError},
+    icrc1::transfer::{Memo, TransferArg, TransferError},
 };
-use serde::{Deserialize as SerdeDeserialize, Serialize};
+use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -18,7 +18,7 @@ thread_local! {
     static STATE: RefCell<DeadManSwitchState> = RefCell::default();
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug, Serialize, SerdeDeserialize)]
+#[derive(CandidType, Deserialize, Clone, Debug, Serialize)]
 pub struct TransactionLog {
     pub timestamp: u64,
     pub transaction_type: String, // "heartbeat", "deposit", "withdrawal", "transfer", "update"
@@ -26,14 +26,17 @@ pub struct TransactionLog {
     pub details: String,
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug, Serialize, SerdeDeserialize)]
+#[derive(CandidType, Deserialize, Clone, Debug, Serialize)]
 pub struct Beneficiary {
+    #[serde(rename = "beneficiary_principal")]
     pub principal: Principal,
     pub percentage: u8, // 0-100, for multiple beneficiaries
+    pub subaccount: Option<Vec<u8>>, // Optional subaccount for ICRC-1 account (typically 32 bytes)
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug, Serialize, SerdeDeserialize)]
+#[derive(CandidType, Deserialize, Clone, Debug, Serialize)]
 pub struct UserAccount {
+    #[serde(rename = "user_principal")]
     pub principal: Principal,
     pub last_heartbeat: u64,
     pub timeout_duration_seconds: u64,
@@ -41,12 +44,24 @@ pub struct UserAccount {
     pub beneficiaries: Vec<Beneficiary>, // Multiple beneficiaries support
     pub balance: u64,
     pub transaction_history: Vec<TransactionLog>,
+    pub contestation_period_seconds: u64, // Grace window before transfer executes
+    pub timeout_detected_at: Option<u64>, // When timeout was first detected
+    pub trusted_parties: Vec<Principal>, // Trusted parties who can override during grace period
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug, Serialize, SerdeDeserialize, Default)]
+#[derive(CandidType, Deserialize, Clone, Debug, Serialize)]
 pub struct DeadManSwitchState {
     pub users: HashMap<Principal, UserAccount>,
     pub ckbtc_ledger: Principal,
+}
+
+impl Default for DeadManSwitchState {
+    fn default() -> Self {
+        Self {
+            users: HashMap::new(),
+            ckbtc_ledger: Principal::anonymous(),
+        }
+    }
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -116,13 +131,17 @@ async fn register(args: RegisterArgs) -> Result<String, String> {
 
     let current_time = time();
 
+    let already_registered = STATE.with(|state| {
+        let s = state.borrow();
+        s.users.contains_key(&caller)
+    });
+
+    if already_registered {
+        return Err("User already registered".to_string());
+    }
+
     STATE.with(|state| {
         let mut s = state.borrow_mut();
-        
-        if s.users.contains_key(&caller) {
-            return Err("User already registered".to_string());
-        }
-
         let account = UserAccount {
             principal: caller,
             last_heartbeat: current_time,
@@ -131,6 +150,7 @@ async fn register(args: RegisterArgs) -> Result<String, String> {
             beneficiaries: vec![Beneficiary {
                 principal: args.beneficiary,
                 percentage: 100,
+                subaccount: None,
             }],
             balance: 0,
             transaction_history: vec![TransactionLog {
@@ -139,6 +159,9 @@ async fn register(args: RegisterArgs) -> Result<String, String> {
                 amount: None,
                 details: format!("Registered with timeout: {}s", args.timeout_duration_seconds),
             }],
+            contestation_period_seconds: 7 * 24 * 60 * 60, // Default 7 days grace period
+            timeout_detected_at: None,
+            trusted_parties: Vec::new(),
         };
 
         s.users.insert(caller, account);
@@ -164,6 +187,8 @@ async fn heartbeat() -> Result<HeartbeatResponse, String> {
         match s.users.get_mut(&caller) {
             Some(account) => {
                 account.last_heartbeat = current_time;
+                // Reset timeout detection if user sends heartbeat during grace period
+                account.timeout_detected_at = None;
                 let next_due = current_time + account.timeout_duration_seconds;
                 account.transaction_history.push(TransactionLog {
                     timestamp: current_time,
@@ -188,9 +213,83 @@ async fn heartbeat() -> Result<HeartbeatResponse, String> {
     })
 }
 
+/// Verify and sync ckBTC balance from ledger
+/// This function checks the actual ledger balance and syncs with tracked balance
+#[update]
+async fn sync_balance() -> Result<String, String> {
+    let caller = ic_cdk::caller();
+    
+    STATE.with(|state| {
+        let s = state.borrow();
+        if !s.users.contains_key(&caller) {
+            return Err("User not registered. Please register first.".to_string());
+        }
+        Ok(())
+    })?;
+
+    let ledger = STATE.with(|state| {
+        let s = state.borrow();
+        s.ckbtc_ledger
+    });
+
+    // Get canister's account balance from ledger
+    let canister_id = ic_cdk::id();
+    let account = Account {
+        owner: canister_id,
+        subaccount: None,
+    };
+
+    let result: Result<(u64,), _> = ic_cdk::call(ledger, "icrc1_balance_of", (account,)).await;
+
+    match result {
+        Ok((ledger_balance,)) => {
+            let current_time = time();
+            STATE.with(|state| {
+                let mut s = state.borrow_mut();
+                if let Some(account) = s.users.get_mut(&caller) {
+                    let previous_balance = account.balance;
+                    account.balance = ledger_balance;
+                    
+                    if ledger_balance != previous_balance {
+                        let difference = ledger_balance as i128 - previous_balance as i128;
+                        let transaction_type = if difference > 0 {
+                            "deposit"
+                        } else {
+                            "balance_sync"
+                        };
+                        
+                        account.transaction_history.push(TransactionLog {
+                            timestamp: current_time,
+                            transaction_type: transaction_type.to_string(),
+                            amount: Some(ledger_balance),
+                            details: format!(
+                                "Balance synced: {} ckBTC (previous: {}, difference: {})",
+                                ledger_balance, previous_balance, difference
+                            ),
+                        });
+                        
+                        if account.transaction_history.len() > 100 {
+                            account.transaction_history.remove(0);
+                        }
+                    }
+                    
+                    ic_cdk::println!("Balance synced for {}: {} ckBTC", caller, ledger_balance);
+                    Ok(format!("Balance synced: {} ckBTC", ledger_balance))
+                } else {
+                    Err("User account not found".to_string())
+                }
+            })
+        }
+        Err((code, msg)) => {
+            ic_cdk::println!("Balance sync failed: code={:?}, msg={}", code, msg);
+            Err(format!("Failed to sync balance: {:?}", msg))
+        }
+    }
+}
+
 /// Deposit ckBTC to the dead man switch
-/// Note: In production, users should transfer ckBTC directly to this canister's account
-/// This function tracks the deposit amount
+/// Note: Users should transfer ckBTC directly to this canister's account first
+/// Then call sync_balance() to verify and update the tracked balance
 #[update]
 async fn deposit(amount: u64) -> Result<String, String> {
     let caller = ic_cdk::caller();
@@ -203,29 +302,64 @@ async fn deposit(amount: u64) -> Result<String, String> {
         Ok(())
     })?;
 
-    // Update balance tracking
-    // In production, verify actual ckBTC transfer from user to canister
-    let current_time = time();
-    STATE.with(|state| {
-        let mut s = state.borrow_mut();
-        if let Some(account) = s.users.get_mut(&caller) {
-            account.balance += amount;
-            account.transaction_history.push(TransactionLog {
-                timestamp: current_time,
-                transaction_type: "deposit".to_string(),
-                amount: Some(amount),
-                details: format!("Deposited {} ckBTC", amount),
-            });
-            // Keep only last 100 transactions
-            if account.transaction_history.len() > 100 {
-                account.transaction_history.remove(0);
-            }
-            ic_cdk::println!("Deposit recorded: {} ckBTC from {}", amount, caller);
-            Ok(format!("Deposited {} ckBTC", amount))
-        } else {
-            Err("User account not found".to_string())
+    // Verify actual balance from ledger
+    let ledger = STATE.with(|state| {
+        let s = state.borrow();
+        s.ckbtc_ledger
+    });
+
+    let canister_id = ic_cdk::id();
+    let account = Account {
+        owner: canister_id,
+        subaccount: None,
+    };
+
+    let result: Result<(u64,), _> = ic_cdk::call(ledger, "icrc1_balance_of", (account,)).await;
+
+    match result {
+        Ok((ledger_balance,)) => {
+            let current_time = time();
+            STATE.with(|state| {
+                let mut s = state.borrow_mut();
+                if let Some(account) = s.users.get_mut(&caller) {
+                    // Verify that ledger balance matches or exceeds expected balance
+                    if ledger_balance < account.balance {
+                        return Err(format!(
+                            "Ledger balance ({}) is less than tracked balance ({}). Please sync balance first.",
+                            ledger_balance, account.balance
+                        ));
+                    }
+                    
+                    // Update balance to match ledger
+                    let previous_balance = account.balance;
+                    account.balance = ledger_balance;
+                    
+                    if ledger_balance > previous_balance {
+                        account.transaction_history.push(TransactionLog {
+                            timestamp: current_time,
+                            transaction_type: "deposit".to_string(),
+                            amount: Some(ledger_balance - previous_balance),
+                            details: format!("Deposited {} ckBTC (verified from ledger)", ledger_balance - previous_balance),
+                        });
+                        
+                        if account.transaction_history.len() > 100 {
+                            account.transaction_history.remove(0);
+                        }
+                    }
+                    
+                    ic_cdk::println!("Deposit verified: {} ckBTC from {} (ledger balance: {})", 
+                        ledger_balance - previous_balance, caller, ledger_balance);
+                    Ok(format!("Deposit verified: {} ckBTC", ledger_balance - previous_balance))
+                } else {
+                    Err("User account not found".to_string())
+                }
+            })
         }
-    })
+        Err((code, msg)) => {
+            ic_cdk::println!("Deposit verification failed: code={:?}, msg={}", code, msg);
+            Err(format!("Failed to verify deposit: {:?}", msg))
+        }
+    }
 }
 
 /// Transfer ckBTC using ICRC-1 standard
@@ -233,16 +367,17 @@ async fn transfer_ckbtc(
     ledger: Principal,
     to: Principal,
     amount: u64,
+    subaccount: Option<Vec<u8>>,
 ) -> Result<u64, TransferError> {
     let transfer_args = TransferArg {
         from_subaccount: None,
         to: Account {
             owner: to,
-            subaccount: None,
+            subaccount: subaccount,
         },
         fee: None,
         created_at_time: None,
-        memo: Some(vec![0x44, 0x45, 0x41, 0x44, 0x4D, 0x41, 0x4E]), // "DEADMAN" in hex
+        memo: Some(Memo::from(vec![0x44, 0x45, 0x41, 0x44, 0x4D, 0x41, 0x4E])), // "DEADMAN" in hex
         amount: amount.into(),
     };
 
@@ -265,14 +400,29 @@ async fn transfer_ckbtc(
     }
 }
 
-/// Check and transfer funds if timeout occurred
+/// Check and transfer funds if timeout occurred (after grace period)
 async fn check_and_transfer(user: &UserAccount) -> Result<TransferResult, String> {
     let current_time = time();
     
-    if current_time < user.last_heartbeat + user.timeout_duration_seconds {
+    // Check if timeout has been reached
+    let timeout_reached = current_time >= user.last_heartbeat + user.timeout_duration_seconds;
+    
+    if !timeout_reached {
         return Ok(TransferResult {
             success: false,
             message: "Timeout not reached".to_string(),
+            block_index: None,
+        });
+    }
+    
+    // Check if we're still in contestation period
+    let timeout_detected_at = user.timeout_detected_at.unwrap_or(user.last_heartbeat + user.timeout_duration_seconds);
+    let grace_period_end = timeout_detected_at + user.contestation_period_seconds;
+    
+    if current_time < grace_period_end {
+        return Ok(TransferResult {
+            success: false,
+            message: format!("Still in contestation period. Transfer will execute at {}", grace_period_end),
             block_index: None,
         });
     }
@@ -300,10 +450,24 @@ async fn check_and_transfer(user: &UserAccount) -> Result<TransferResult, String
         for beneficiary in &user.beneficiaries {
             let amount = (user.balance as u128 * beneficiary.percentage as u128 / 100) as u64;
             if amount > 0 {
-                match transfer_ckbtc(ledger, beneficiary.principal, amount).await {
+                let account_type = if beneficiary.subaccount.is_some() {
+                    "principal-associated account"
+                } else {
+                    "wallet address"
+                };
+                ic_cdk::println!(
+                    "Transferring {} ckBTC to {} ({})",
+                    amount, beneficiary.principal, account_type
+                );
+                match transfer_ckbtc(ledger, beneficiary.principal, amount, beneficiary.subaccount.clone()).await {
                     Ok(block_index) => {
                         total_transferred += amount;
-                        transfer_results.push(format!("{} ckBTC to {} (block: {})", amount, beneficiary.principal, block_index));
+                        let account_desc = if beneficiary.subaccount.is_some() {
+                            format!("account with subaccount")
+                        } else {
+                            format!("wallet")
+                        };
+                        transfer_results.push(format!("{} ckBTC to {} {} (block: {})", amount, beneficiary.principal, account_desc, block_index));
                     }
                     Err(e) => {
                         ic_cdk::println!("Transfer error to {}: {:?}", beneficiary.principal, e);
@@ -331,7 +495,7 @@ async fn check_and_transfer(user: &UserAccount) -> Result<TransferResult, String
             user.principal, user.balance, beneficiary
         );
 
-        match transfer_ckbtc(ledger, beneficiary, user.balance).await {
+        match transfer_ckbtc(ledger, beneficiary, user.balance, None).await {
             Ok(block_index) => {
                 ic_cdk::println!("Transfer successful, block index: {}", block_index);
                 Ok(TransferResult {
@@ -351,7 +515,7 @@ async fn check_and_transfer(user: &UserAccount) -> Result<TransferResult, String
 /// Start the periodic timeout checker
 fn start_timeout_checker() {
     set_timer_interval(Duration::from_secs(60), || {
-        ic_cdk::spawn(check_timeouts());
+        check_timeouts()
     });
     ic_cdk::println!("Timeout checker started - checking every 60 seconds");
 }
@@ -360,20 +524,57 @@ fn start_timeout_checker() {
 async fn check_timeouts() {
     let current_time = time();
     let mut users_to_check = Vec::new();
+    let mut users_to_mark_timeout = Vec::new();
 
     STATE.with(|state| {
         let s = state.borrow();
         for (principal, account) in s.users.iter() {
             let time_since_heartbeat = current_time.saturating_sub(account.last_heartbeat);
-            if time_since_heartbeat >= account.timeout_duration_seconds {
-                ic_cdk::println!(
-                    "User {} timeout: {}s since last heartbeat (threshold: {}s)",
-                    principal, time_since_heartbeat, account.timeout_duration_seconds
-                );
-                users_to_check.push(account.clone());
+            let timeout_reached = time_since_heartbeat >= account.timeout_duration_seconds;
+            
+            if timeout_reached {
+                // Mark timeout detection if not already marked
+                if account.timeout_detected_at.is_none() {
+                    users_to_mark_timeout.push(*principal);
+                    ic_cdk::println!(
+                        "User {} timeout detected: {}s since last heartbeat (threshold: {}s). Grace period started.",
+                        principal, time_since_heartbeat, account.timeout_duration_seconds
+                    );
+                }
+                
+                // Check if grace period has passed
+                let timeout_detected_at = account.timeout_detected_at.unwrap_or(account.last_heartbeat + account.timeout_duration_seconds);
+                let grace_period_end = timeout_detected_at + account.contestation_period_seconds;
+                
+                if current_time >= grace_period_end {
+                    ic_cdk::println!(
+                        "User {} grace period expired. Transfer will be executed.",
+                        principal
+                    );
+                    users_to_check.push(account.clone());
+                }
             }
         }
     });
+    
+    // Mark timeout detection timestamps
+    for principal in users_to_mark_timeout {
+        STATE.with(|state| {
+            let mut s = state.borrow_mut();
+            if let Some(account) = s.users.get_mut(&principal) {
+                account.timeout_detected_at = Some(current_time);
+                account.transaction_history.push(TransactionLog {
+                    timestamp: current_time,
+                    transaction_type: "timeout_detected".to_string(),
+                    amount: None,
+                    details: format!("Timeout detected. Grace period: {}s", account.contestation_period_seconds),
+                });
+                if account.transaction_history.len() > 100 {
+                    account.transaction_history.remove(0);
+                }
+            }
+        });
+    }
 
     for user in users_to_check {
         ic_cdk::println!("Processing timeout for user: {}", user.principal);
@@ -411,7 +612,12 @@ fn get_account_info() -> Result<UserAccount, String> {
                     account.beneficiaries = vec![Beneficiary {
                         principal: account.beneficiary,
                         percentage: 100,
+                        subaccount: None,
                     }];
+                }
+                // Initialize new fields for backward compatibility
+                if account.contestation_period_seconds == 0 {
+                    account.contestation_period_seconds = 7 * 24 * 60 * 60; // Default 7 days
                 }
                 Ok(account.clone())
             }
@@ -502,6 +708,7 @@ async fn update_settings(
                     account.beneficiaries = vec![Beneficiary {
                         principal: ben,
                         percentage: 100,
+                        subaccount: None,
                     }];
                     changes.push(format!("beneficiary: {}", ben));
                 }
@@ -557,8 +764,8 @@ async fn withdraw(amount: u64, to: Principal) -> Result<String, String> {
         s.ckbtc_ledger
     });
 
-    // Transfer ckBTC to withdrawal address
-    match transfer_ckbtc(ledger, to, amount).await {
+    // Transfer ckBTC to withdrawal address (default to wallet address, no subaccount)
+    match transfer_ckbtc(ledger, to, amount, None).await {
         Ok(block_index) => {
             STATE.with(|state| {
                 let mut s = state.borrow_mut();
@@ -597,6 +804,220 @@ fn get_transaction_history() -> Result<Vec<TransactionLog>, String> {
             .map(|u| u.transaction_history.clone())
             .ok_or_else(|| "User not registered".to_string())
     })
+}
+
+/// Cancel timeout transfer during grace period (user or trusted party)
+#[update]
+async fn cancel_timeout_transfer() -> Result<String, String> {
+    let caller = ic_cdk::caller();
+    let current_time = time();
+    
+    STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        
+        match s.users.get_mut(&caller) {
+            Some(account) => {
+                // User can cancel their own timeout
+                if account.timeout_detected_at.is_some() {
+                    account.timeout_detected_at = None;
+                    account.transaction_history.push(TransactionLog {
+                        timestamp: current_time,
+                        transaction_type: "timeout_cancelled".to_string(),
+                        amount: None,
+                        details: "Timeout transfer cancelled by user".to_string(),
+                    });
+                    if account.transaction_history.len() > 100 {
+                        account.transaction_history.remove(0);
+                    }
+                    ic_cdk::println!("Timeout transfer cancelled by user: {}", caller);
+                    Ok("Timeout transfer cancelled".to_string())
+                } else {
+                    Err("No active timeout to cancel".to_string())
+                }
+            }
+            None => {
+                // Check if caller is a trusted party for any user
+                let mut cancelled = false;
+                for (principal, account) in s.users.iter_mut() {
+                    if account.trusted_parties.contains(&caller) && account.timeout_detected_at.is_some() {
+                        account.timeout_detected_at = None;
+                        account.transaction_history.push(TransactionLog {
+                            timestamp: current_time,
+                            transaction_type: "timeout_cancelled".to_string(),
+                            amount: None,
+                            details: format!("Timeout transfer cancelled by trusted party: {}", caller),
+                        });
+                        if account.transaction_history.len() > 100 {
+                            account.transaction_history.remove(0);
+                        }
+                        cancelled = true;
+                        ic_cdk::println!("Timeout transfer cancelled by trusted party {} for user {}", caller, principal);
+                    }
+                }
+                if cancelled {
+                    Ok("Timeout transfer cancelled by trusted party".to_string())
+                } else {
+                    Err("Not authorized to cancel timeout transfer".to_string())
+                }
+            }
+        }
+    })
+}
+
+/// Add trusted party who can override during grace period
+#[update]
+async fn add_trusted_party(trusted_party: Principal) -> Result<String, String> {
+    let caller = ic_cdk::caller();
+    let current_time = time();
+    
+    STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        
+        match s.users.get_mut(&caller) {
+            Some(account) => {
+                if account.trusted_parties.contains(&trusted_party) {
+                    return Err("Trusted party already added".to_string());
+                }
+                account.trusted_parties.push(trusted_party);
+                account.transaction_history.push(TransactionLog {
+                    timestamp: current_time,
+                    transaction_type: "update".to_string(),
+                    amount: None,
+                    details: format!("Added trusted party: {}", trusted_party),
+                });
+                if account.transaction_history.len() > 100 {
+                    account.transaction_history.remove(0);
+                }
+                ic_cdk::println!("Trusted party added: {} for user {}", trusted_party, caller);
+                Ok(format!("Trusted party {} added", trusted_party))
+            }
+            None => Err("User not registered".to_string()),
+        }
+    })
+}
+
+/// Remove trusted party
+#[update]
+async fn remove_trusted_party(trusted_party: Principal) -> Result<String, String> {
+    let caller = ic_cdk::caller();
+    let current_time = time();
+    
+    STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        
+        match s.users.get_mut(&caller) {
+            Some(account) => {
+                if let Some(pos) = account.trusted_parties.iter().position(|&x| x == trusted_party) {
+                    account.trusted_parties.remove(pos);
+                    account.transaction_history.push(TransactionLog {
+                        timestamp: current_time,
+                        transaction_type: "update".to_string(),
+                        amount: None,
+                        details: format!("Removed trusted party: {}", trusted_party),
+                    });
+                    if account.transaction_history.len() > 100 {
+                        account.transaction_history.remove(0);
+                    }
+                    ic_cdk::println!("Trusted party removed: {} for user {}", trusted_party, caller);
+                    Ok(format!("Trusted party {} removed", trusted_party))
+                } else {
+                    Err("Trusted party not found".to_string())
+                }
+            }
+            None => Err("User not registered".to_string()),
+        }
+    })
+}
+
+/// Update contestation period
+#[update]
+async fn update_contestation_period(contestation_period_seconds: u64) -> Result<String, String> {
+    let caller = ic_cdk::caller();
+    let current_time = time();
+    
+    STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        
+        match s.users.get_mut(&caller) {
+            Some(account) => {
+                account.contestation_period_seconds = contestation_period_seconds;
+                account.transaction_history.push(TransactionLog {
+                    timestamp: current_time,
+                    transaction_type: "update".to_string(),
+                    amount: None,
+                    details: format!("Contestation period updated to {}s", contestation_period_seconds),
+                });
+                if account.transaction_history.len() > 100 {
+                    account.transaction_history.remove(0);
+                }
+                ic_cdk::println!("Contestation period updated for user {}: {}s", caller, contestation_period_seconds);
+                Ok(format!("Contestation period updated to {}s", contestation_period_seconds))
+            }
+            None => Err("User not registered".to_string()),
+        }
+    })
+}
+
+/// Get timeout status including grace period information
+#[query]
+fn get_timeout_status() -> Result<TimeoutStatus, String> {
+    let caller = ic_cdk::caller();
+    let current_time = time();
+    
+    STATE.with(|state| {
+        let s = state.borrow();
+        match s.users.get(&caller) {
+            Some(account) => {
+                let time_since_heartbeat = current_time.saturating_sub(account.last_heartbeat);
+                let timeout_reached = time_since_heartbeat >= account.timeout_duration_seconds;
+                
+                let grace_period_end = if let Some(timeout_at) = account.timeout_detected_at {
+                    timeout_at + account.contestation_period_seconds
+                } else if timeout_reached {
+                    account.last_heartbeat + account.timeout_duration_seconds + account.contestation_period_seconds
+                } else {
+                    0
+                };
+                
+                let in_grace_period = timeout_reached && current_time < grace_period_end;
+                let time_until_timeout = if timeout_reached {
+                    0
+                } else {
+                    account.timeout_duration_seconds.saturating_sub(time_since_heartbeat)
+                };
+                
+                let time_until_transfer = if in_grace_period {
+                    grace_period_end.saturating_sub(current_time)
+                } else {
+                    0
+                };
+                
+                Ok(TimeoutStatus {
+                    timeout_reached,
+                    in_grace_period,
+                    time_until_timeout,
+                    time_until_transfer,
+                    grace_period_end,
+                    last_heartbeat: account.last_heartbeat,
+                    timeout_duration: account.timeout_duration_seconds,
+                    contestation_period: account.contestation_period_seconds,
+                })
+            }
+            None => Err("User not registered".to_string()),
+        }
+    })
+}
+
+#[derive(CandidType, Deserialize, Debug, Serialize)]
+pub struct TimeoutStatus {
+    pub timeout_reached: bool,
+    pub in_grace_period: bool,
+    pub time_until_timeout: u64,
+    pub time_until_transfer: u64,
+    pub grace_period_end: u64,
+    pub last_heartbeat: u64,
+    pub timeout_duration: u64,
+    pub contestation_period: u64,
 }
 
 #[query]

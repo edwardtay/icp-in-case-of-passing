@@ -8,8 +8,12 @@ import {
   logICPEvent 
 } from './icp-utils';
 import { getAllTokenBalances, formatTokenBalance, TOKEN_CANISTERS } from './wallet-assets';
-import { HttpAgent } from '@dfinity/agent';
+import { HttpAgent, Actor } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import AddressBalanceChecker from './components/AddressBalanceChecker';
+import InfoModal from './components/InfoModal';
+import TimeoutCalendar from './components/TimeoutCalendar';
 import './App.css';
 
 function App() {
@@ -71,7 +75,7 @@ function App() {
     if (!showInfoTooltip && !showStepsTooltip && !showAccountMetadata) return;
     
     const handleClickOutside = (event) => {
-      if (!event.target.closest('.info-icon-container') && 
+      if (!event.target.closest('.info-icon-container') &&
           !event.target.closest('.steps-icon-container') &&
           !event.target.closest('.wallet-badge-container')) {
         setShowInfoTooltip(false);
@@ -163,9 +167,6 @@ function App() {
     const handleKeyPress = (e) => {
       // ESC key to close modals
       if (e.key === 'Escape') {
-        if (showInfoTooltip) {
-          setShowInfoTooltip(false);
-        }
         if (showAccountMetadata) {
           setShowAccountMetadata(false);
         }
@@ -204,91 +205,203 @@ function App() {
       setPriceLoading(true);
       setPriceError(null);
 
-      // Try CoinGecko API first (free tier, no API key needed for basic calls)
       try {
-        // Try different possible coin IDs
-        const coinIds = ['chain-key-bitcoin', 'ckbtc'];
         let priceData = null;
         let source = null;
 
-        for (const coinId of coinIds) {
+        // Strategy 1: Try CoinGecko with correct ckBTC coin ID
+        const coinGeckoIds = ['chain-key-bitcoin', 'ckbtc'];
+        for (const coinId of coinGeckoIds) {
           try {
-            // Fetch detailed price data with market stats
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            
             const response = await fetch(
               `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true&include_7d_change=true&include_30d_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true`,
               { 
                 method: 'GET',
                 headers: {
                   'Accept': 'application/json',
-                }
+                },
+                signal: controller.signal
               }
             );
             
+            clearTimeout(timeoutId);
+            
             if (response.ok) {
               const data = await response.json();
-              if (data[coinId]) {
+              if (data[coinId] && data[coinId].usd) {
                 priceData = {
                   price: data[coinId].usd,
                   change24h: data[coinId].usd_24h_change || 0,
-                  change7d: data[coinId].usd_7d_change || null,
-                  change30d: data[coinId].usd_30d_change || null,
-                  marketCap: data[coinId].usd_market_cap || null,
-                  volume24h: data[coinId].usd_24h_vol || null,
-                  lastUpdated: data[coinId].last_updated_at || null,
+                  change7d: data[coinId].usd_7d_change ?? null,
+                  change30d: data[coinId].usd_30d_change ?? null,
+                  marketCap: data[coinId].usd_market_cap ?? null,
+                  volume24h: data[coinId].usd_24h_vol ?? null,
+                  lastUpdated: data[coinId].last_updated_at ?? null,
                   source: 'CoinGecko'
                 };
                 source = coinId;
+                console.log(`Successfully fetched ckBTC price from CoinGecko (${coinId}):`, priceData);
                 break;
               }
+            } else {
+              console.warn(`CoinGecko API returned ${response.status} for ${coinId}`);
             }
           } catch (e) {
-            console.log(`CoinGecko API failed for ${coinId}:`, e);
+            if (e.name !== 'AbortError') {
+              console.warn(`CoinGecko API failed for ${coinId}:`, e.message);
+            }
+            continue;
           }
         }
 
-        // If CoinGecko fails, try using Bitcoin price as proxy (ckBTC is 1:1 with BTC)
+        // Strategy 2: Fallback to Bitcoin price (ckBTC is 1:1 with BTC)
         if (!priceData) {
           try {
+            console.log('Falling back to Bitcoin price as proxy...');
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            
             const btcResponse = await fetch(
-              'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_7d_change=true&include_30d_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true'
+              'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_7d_change=true&include_30d_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true',
+              {
+                signal: controller.signal
+              }
             );
+            
+            clearTimeout(timeoutId);
+            
             if (btcResponse.ok) {
               const btcData = await btcResponse.json();
-              if (btcData.bitcoin) {
+              if (btcData.bitcoin && btcData.bitcoin.usd) {
                 priceData = {
                   price: btcData.bitcoin.usd,
                   change24h: btcData.bitcoin.usd_24h_change || 0,
-                  change7d: btcData.bitcoin.usd_7d_change || null,
-                  change30d: btcData.bitcoin.usd_30d_change || null,
-                  marketCap: btcData.bitcoin.usd_market_cap || null,
-                  volume24h: btcData.bitcoin.usd_24h_vol || null,
-                  lastUpdated: btcData.bitcoin.last_updated_at || null,
+                  change7d: btcData.bitcoin.usd_7d_change ?? null,
+                  change30d: btcData.bitcoin.usd_30d_change ?? null,
+                  marketCap: btcData.bitcoin.usd_market_cap ?? null,
+                  volume24h: btcData.bitcoin.usd_24h_vol ?? null,
+                  lastUpdated: btcData.bitcoin.last_updated_at ?? null,
                   source: 'CoinGecko (Bitcoin proxy)'
                 };
                 source = 'bitcoin-proxy';
+                console.log('Using Bitcoin price as proxy for ckBTC:', priceData);
               }
             }
           } catch (e) {
-            console.log('Bitcoin proxy fetch failed:', e);
+            if (e.name !== 'AbortError') {
+              console.warn('Bitcoin proxy fetch failed:', e.message);
+            }
           }
         }
 
-        if (priceData) {
+        // Strategy 3: Try alternative API (CoinCap as backup)
+        if (!priceData) {
+          try {
+            console.log('Trying CoinCap API as backup...');
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            
+            const coinCapResponse = await fetch(
+              'https://api.coincap.io/v2/assets/bitcoin',
+              {
+                signal: controller.signal
+              }
+            );
+            
+            clearTimeout(timeoutId);
+            
+            if (coinCapResponse.ok) {
+              const coinCapData = await coinCapResponse.json();
+              if (coinCapData.data && coinCapData.data.priceUsd) {
+                const btcPrice = parseFloat(coinCapData.data.priceUsd);
+                const change24h = parseFloat(coinCapData.data.changePercent24Hr || 0);
+                
+                priceData = {
+                  price: btcPrice,
+                  change24h: change24h,
+                  change7d: null,
+                  change30d: null,
+                  marketCap: coinCapData.data.marketCapUsd ? parseFloat(coinCapData.data.marketCapUsd) : null,
+                  volume24h: coinCapData.data.volumeUsd24Hr ? parseFloat(coinCapData.data.volumeUsd24Hr) : null,
+                  lastUpdated: Date.now() / 1000,
+                  source: 'CoinCap (Bitcoin proxy)'
+                };
+                source = 'coincap-proxy';
+                console.log('Using CoinCap Bitcoin price as proxy:', priceData);
+              }
+            }
+          } catch (e) {
+            if (e.name !== 'AbortError') {
+              console.warn('CoinCap API failed:', e.message);
+            }
+          }
+        }
+
+        if (priceData && priceData.price) {
           setCkbtcPrice(priceData);
           setPriceSource(source);
+          setPriceError(null);
+          console.log('Price successfully set:', priceData);
         } else {
-          throw new Error('No price data available');
+          // Last resort: Try a simple Bitcoin fetch without all the extra params
+          console.log('All strategies failed, trying simple Bitcoin fetch...');
+          try {
+            const simpleBtcResponse = await fetch(
+              'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd'
+            );
+            if (simpleBtcResponse.ok) {
+              const simpleBtcData = await simpleBtcResponse.json();
+              if (simpleBtcData.bitcoin && simpleBtcData.bitcoin.usd) {
+                priceData = {
+                  price: simpleBtcData.bitcoin.usd,
+                  change24h: 0,
+                  change7d: null,
+                  change30d: null,
+                  marketCap: null,
+                  volume24h: null,
+                  lastUpdated: Date.now() / 1000,
+                  source: 'CoinGecko (Bitcoin - Simple)'
+                };
+                setCkbtcPrice(priceData);
+                setPriceSource('bitcoin-simple');
+                setPriceError(null);
+                console.log('Using simple Bitcoin price:', priceData);
+              } else {
+                throw new Error('No price data available from any source');
+              }
+            } else {
+              throw new Error('No price data available from any source');
+            }
+          } catch (finalError) {
+            console.error('Final price fetch attempt failed:', finalError);
+            // Even if all APIs fail, we can show a message that ckBTC = BTC
+            // But don't throw - let the error handler deal with it
+            throw new Error('Unable to fetch price. ckBTC is 1:1 with Bitcoin.');
+          }
         }
       } catch (error) {
         console.error('Price fetch error:', error);
-        setPriceError('Unable to fetch price data. ckBTC is 1:1 with Bitcoin.');
-        // Set a fallback message
-        setCkbtcPrice({
-          price: null,
-          change24h: null,
-          source: 'Unavailable',
-          note: 'ckBTC is 1:1 with Bitcoin. Check Bitcoin price as reference.'
-        });
+        const errorMsg = error.message || 'Unable to fetch price data';
+        setPriceError(errorMsg);
+        
+        // Only set price to null if we don't have a previous price
+        // This way, if a previous fetch succeeded, we keep showing that price
+        if (!ckbtcPrice || !ckbtcPrice.price) {
+          setCkbtcPrice({
+            price: null,
+            change24h: null,
+            change7d: null,
+            change30d: null,
+            marketCap: null,
+            volume24h: null,
+            lastUpdated: null,
+            source: 'Unavailable',
+            note: 'ckBTC is 1:1 with Bitcoin. Check Bitcoin price as reference.'
+          });
+        }
       } finally {
         setPriceLoading(false);
       }
@@ -583,6 +696,9 @@ function App() {
     }
   };
 
+
+  // Helper function to check balances via icexplorer.io API
+
   const loadIdentityNumber = async (principalText) => {
     try {
       // Check localStorage first (might have been set manually)
@@ -713,6 +829,17 @@ function App() {
     }
     
     throw new Error('No identity available. Please connect your wallet.');
+  };
+
+  const handleBeneficiaryChange = (value) => {
+    // Clear error when user starts typing
+    if (beneficiaryError) {
+      setBeneficiaryError('');
+    }
+    setRegisterForm({
+      ...registerForm,
+      beneficiary: value
+    });
   };
 
   const handleRegister = async (e) => {
@@ -993,34 +1120,43 @@ function App() {
   const allWallets = Object.values(WALLETS);
 
   return (
-    <div className="app">
+    <ErrorBoundary>
+      <div className="app">
       <header className="app-header">
+        <div className="header-top-right">
+          <div className="info-icon-container">
+            <button
+              className="info-icon"
+              onClick={() => setShowInfoTooltip(!showInfoTooltip)}
+              aria-label="About this app"
+              title="About & FAQ"
+            >
+              ℹ️
+            </button>
+          </div>
+        </div>
         <div className="header-title-container">
           <h1>🔐 ICP: In Case of Passing</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <div className="info-icon-container">
-              <button
-                className="info-icon"
-                onClick={() => setShowInfoTooltip(!showInfoTooltip)}
-                aria-label="About this app"
-              >
-                ℹ️
-              </button>
-            </div>
-          </div>
         </div>
         <p>Automated ckBTC Transfer on Internet Computer Protocol (ICP)</p>
         {isConnected && (
           <div className="wallet-info">
-            <div className="wallet-badge-container">
-              <button 
-                className="wallet-badge wallet-badge-button"
-                onClick={() => setShowAccountMetadata(!showAccountMetadata)}
-                title="Click to view account details"
-              >
-              {WALLETS[currentWallet?.toUpperCase()]?.icon} {WALLETS[currentWallet?.toUpperCase()]?.name || 'Connected'}
+            <div className="wallet-info-top">
+              <div className="wallet-badge-container">
+                <div className="wallet-badge">
+                  {WALLETS[currentWallet?.toUpperCase()]?.icon} {WALLETS[currentWallet?.toUpperCase()]?.name || 'Connected'}
+                </div>
+              </div>
+              <button onClick={handleDisconnect} className="btn-disconnect">
+                Disconnect
               </button>
-              {showAccountMetadata && (
+            </div>
+            {principal && (
+              <div className="principal-display">
+                {principal}
+              </div>
+            )}
+            {showAccountMetadata && (
                 <div className="modal-overlay" onClick={() => setShowAccountMetadata(false)}>
                   <div className="modal-content account-metadata-modal" onClick={(e) => e.stopPropagation()}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
@@ -1107,10 +1243,6 @@ function App() {
                   </div>
                 </div>
               )}
-            </div>
-            <button onClick={handleDisconnect} className="btn-disconnect">
-              Disconnect
-            </button>
           </div>
         )}
       </header>
@@ -1169,65 +1301,6 @@ function App() {
             </button>
           </div>
 
-          {/* Extension Wallets - Secondary Options */}
-          {extensionWallets.length > 0 && (
-            <div className="wallet-list wallet-list-secondary wallet-list-compact">
-              <div className="wallet-list-header">
-                <h3>Extension Wallets</h3>
-                <button 
-                  onClick={checkWallets} 
-                  className="btn-refresh-small"
-                  title="Refresh"
-                >
-                  ↻
-                </button>
-              </div>
-              <div className="wallet-buttons-compact">
-                {extensionWallets.map((wallet) => (
-                  <button
-                    key={wallet.id}
-                    onClick={() => handleConnectWallet(wallet.id)}
-                    className="btn btn-wallet-compact"
-                    disabled={loading}
-                  >
-                    {wallet.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Download Suggestions if no extensions */}
-          {extensionWallets.length === 0 && (
-            <div className="wallet-suggestions wallet-suggestions-compact">
-              <div className="wallet-list-header">
-                <h3>Extension Wallets</h3>
-                <button 
-                  onClick={checkWallets} 
-                  className="btn-refresh-small"
-                  title="Refresh"
-                >
-                  ↻
-                </button>
-              </div>
-              <p className="wallet-description-secondary">
-                Install an extension wallet for alternative connection:
-              </p>
-              <div className="wallet-links-compact">
-                {allWallets.filter(w => w.id !== 'ii').map((wallet) => (
-                  <a
-                    key={wallet.id}
-                    href={wallet.downloadUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="wallet-link-compact"
-                  >
-                    {wallet.name} →
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       ) : (
         <div className="dashboard">
@@ -1239,82 +1312,18 @@ function App() {
               </h2>
               <button
                 onClick={async () => {
-                  setPriceLoading(true);
-                  const fetchPrice = async () => {
-                    setPriceError(null);
-                    try {
-                      const coinIds = ['chain-key-bitcoin', 'ckbtc'];
-                      let priceData = null;
-                      let source = null;
-
-                      for (const coinId of coinIds) {
-                        try {
-                          const response = await fetch(
-                            `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true&include_7d_change=true&include_30d_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true`
-                          );
-                          if (response.ok) {
-                            const data = await response.json();
-                            if (data[coinId]) {
-                              priceData = {
-                                price: data[coinId].usd,
-                                change24h: data[coinId].usd_24h_change || 0,
-                                change7d: data[coinId].usd_7d_change || null,
-                                change30d: data[coinId].usd_30d_change || null,
-                                marketCap: data[coinId].usd_market_cap || null,
-                                volume24h: data[coinId].usd_24h_vol || null,
-                                lastUpdated: data[coinId].last_updated_at || null,
-                                source: 'CoinGecko'
-                              };
-                              source = coinId;
-                              break;
-                            }
-                          }
-                        } catch (e) {
-                          console.log(`CoinGecko API failed for ${coinId}:`, e);
-                        }
-                      }
-
-                      if (!priceData) {
-                        const btcResponse = await fetch(
-                          'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_7d_change=true&include_30d_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true'
-                        );
-                        if (btcResponse.ok) {
-                          const btcData = await btcResponse.json();
-                          if (btcData.bitcoin) {
-                            priceData = {
-                              price: btcData.bitcoin.usd,
-                              change24h: btcData.bitcoin.usd_24h_change || 0,
-                              change7d: btcData.bitcoin.usd_7d_change || null,
-                              change30d: btcData.bitcoin.usd_30d_change || null,
-                              marketCap: btcData.bitcoin.usd_market_cap || null,
-                              volume24h: btcData.bitcoin.usd_24h_vol || null,
-                              lastUpdated: btcData.bitcoin.last_updated_at || null,
-                              source: 'CoinGecko (Bitcoin proxy)'
-                            };
-                            source = 'bitcoin-proxy';
-                          }
-                        }
-                      }
-
-                      if (priceData) {
-                        setCkbtcPrice(priceData);
-                        setPriceSource(source);
-                        showMessage('Price data refreshed!', 'success');
-                      }
-                    } catch (error) {
-                      console.error('Price refresh error:', error);
-                    } finally {
-                      setPriceLoading(false);
-                    }
-                  };
+                  // Use the main fetchPrice function
                   await fetchPrice();
+                  if (!priceError && ckbtcPrice && ckbtcPrice.price) {
+                    showMessage('Price refreshed!', 'success');
+                  }
                 }}
                 className="btn-refresh-small"
                 title="Refresh price data"
                 disabled={priceLoading}
                 style={{ padding: '4px 8px', fontSize: '0.75rem' }}
               >
-                ↻
+                {priceLoading ? '⏳' : '↻'}
               </button>
             </div>
 
@@ -1474,50 +1483,8 @@ function App() {
               </button>
             </div>
 
-            {assetsLoading && walletAssets.length === 0 ? (
-              <div style={{ padding: '20px', textAlign: 'center', color: '#666', fontSize: '0.85rem' }}>
-                ⏳ Loading assets...
-              </div>
-            ) : assetsError ? (
-              <div style={{ padding: '16px', textAlign: 'center', color: '#ef4444', fontSize: '0.85rem' }}>
-                ⚠️ {assetsError}
-              </div>
-            ) : walletAssets.length === 0 ? (
-              <div style={{ padding: '20px', textAlign: 'center', color: '#999', fontSize: '0.85rem' }}>
-                <div style={{ marginBottom: '8px' }}>💼</div>
-                <div>No assets found in your wallet</div>
-                <div style={{ marginTop: '8px', fontSize: '0.75rem', color: '#ccc' }}>
-                  Assets will appear here once you have tokens in your wallet
-                </div>
-              </div>
-            ) : (
-              <div className="wallet-assets-grid">
-                {walletAssets.map((asset, index) => (
-                  <div key={index} className="asset-card" style={{ borderLeft: `3px solid ${asset.color || '#666'}` }}>
-                    <div className="asset-header">
-                      <div className="asset-icon" style={{ color: asset.color || '#666' }}>
-                        {asset.icon || '🪙'}
-                      </div>
-                      <div className="asset-info">
-                        <div className="asset-symbol">{asset.symbol}</div>
-                        <div className="asset-name">{asset.name}</div>
-                      </div>
-                    </div>
-                    <div className="asset-balance">
-                      <div className="asset-balance-value">
-                        {formatTokenBalance(asset.balance, asset.decimals || 8)}
-                      </div>
-                      <div className="asset-balance-symbol">{asset.symbol}</div>
-                    </div>
-                    {asset.success === false && asset.error && (
-                      <div className="asset-error" style={{ fontSize: '0.75rem', color: '#ef4444', marginTop: '8px' }}>
-                        ⚠️ {asset.error}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+            {/* Check Any Address Section */}
+            <AddressBalanceChecker />
 
             {/* How to Get ckBTC Section */}
             <div style={{ marginTop: '24px', paddingTop: '24px', borderTop: '1px solid #e5e5e5' }}>
@@ -1561,53 +1528,51 @@ function App() {
 
                 <div className="guide-section" style={{ marginTop: '20px' }}>
                   <h4 style={{ fontSize: '0.9rem', fontWeight: '500', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span>🌉</span>
-                    <span>Method 2: Bridge Bitcoin</span>
-                  </h4>
-                  <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '10px', lineHeight: '1.5' }}>
-                    Convert BTC to ckBTC by depositing Bitcoin to the ckBTC minter:
-                  </p>
-                  <div className="guide-links">
-                    <a 
-                      href="https://internetcomputer.org/docs/defi/chain-key-tokens/ckbtc/overview" 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="guide-link"
-                    >
-                      <span>📖</span>
-                      <span>Learn More</span>
-                      <span>→</span>
-                    </a>
-                    <a 
-                      href="https://dashboard.internetcomputer.org/ckbtc" 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="guide-link"
-                    >
-                      <span>🌐</span>
-                      <span>ckBTC Dashboard</span>
-                      <span>→</span>
-                    </a>
-                  </div>
-                </div>
-
-                <div className="guide-section" style={{ marginTop: '20px' }}>
-                  <h4 style={{ fontSize: '0.9rem', fontWeight: '500', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <span>🏪</span>
-                    <span>Method 3: Buy on Exchange</span>
+                    <span>Method 2: Buy on Exchange</span>
                   </h4>
                   <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '10px', lineHeight: '1.5' }}>
                     Purchase ckBTC directly from centralized exchanges:
                   </p>
                   <div className="guide-links">
                     <a 
-                      href="https://www.lbank.com/how-to-buy/chain-key-bitcoin" 
-                      target="_blank" 
+                      href="https://www.gate.io/trade/ckBTC_USDT" 
+                      target="_blank"
                       rel="noopener noreferrer"
                       className="guide-link"
                     >
                       <span>💳</span>
-                      <span>LBank</span>
+                      <span>Gate.io</span>
+                      <span>→</span>
+                    </a>
+                    <a 
+                      href="https://www.kucoin.com/trade/ckBTC-USDT" 
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="guide-link"
+                    >
+                      <span>💳</span>
+                      <span>KuCoin</span>
+                      <span>→</span>
+                    </a>
+                    <a 
+                      href="https://www.okx.com/trade-spot/ckbtc-usdt" 
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="guide-link"
+                    >
+                      <span>💳</span>
+                      <span>OKX</span>
+                      <span>→</span>
+                    </a>
+                    <a 
+                      href="https://www.mexc.com/exchange/ckBTC_USDT" 
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="guide-link"
+                    >
+                      <span>💳</span>
+                      <span>MEXC</span>
                       <span>→</span>
                     </a>
                   </div>
@@ -1618,54 +1583,7 @@ function App() {
 
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <h2 style={{ margin: 0 }}>Account Status</h2>
-                <div className="steps-icon-container">
-                  <button
-                    onClick={() => setShowStepsTooltip(!showStepsTooltip)}
-                    aria-label="How it works"
-                    style={{ 
-                      background: 'transparent',
-                      border: 'none',
-                      color: '#666',
-                      cursor: 'pointer',
-                      fontSize: '0.9rem',
-                      textDecoration: 'underline',
-                      padding: 0,
-                      fontFamily: 'inherit'
-                    }}
-                  >
-                    How it works
-                  </button>
-                  {showStepsTooltip && (
-                    <div className="info-tooltip" style={{ left: '0', transform: 'none', marginTop: '8px' }}>
-                      <div className="info-tooltip-content">
-                        <h3>How It Works - Step by Step</h3>
-                        <ol style={{ margin: '12px 0', paddingLeft: '20px', lineHeight: '1.8' }}>
-                          <li style={{ marginBottom: '12px' }}>
-                            <strong>Connect Your Wallet</strong>
-                          </li>
-                          <li style={{ marginBottom: '12px' }}>
-                            <strong>Register Your Account</strong>
-                          </li>
-                          <li style={{ marginBottom: '12px' }}>
-                            <strong>Deposit ckBTC</strong>
-                          </li>
-                          <li style={{ marginBottom: '12px' }}>
-                            <strong>Send Heartbeats:</strong> Regularly send heartbeats before your timeout expires to reset the timer and prevent automatic transfer
-                          </li>
-                          <li style={{ marginBottom: '12px' }}>
-                            <strong>Automatic Transfer:</strong> If you don't send a heartbeat within your timeout period, your funds automatically transfer to the beneficiary
-                          </li>
-                        </ol>
-                        <p style={{ marginTop: '16px', marginBottom: 0, fontSize: '0.85rem', color: '#666', fontStyle: 'italic' }}>
-                          💡 <strong>Tip:</strong> Set calendar reminders to send heartbeats regularly!
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <h2 style={{ margin: 0 }}>Account Status</h2>
               <button 
                 onClick={async () => {
                   try {
@@ -1686,7 +1604,7 @@ function App() {
                 <label>Principal:</label>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                   <code style={{ flex: 1, minWidth: 0 }}>{principal}</code>
-                  {identityNumber ? (
+                  {identityNumber && (
                     <span style={{ 
                       background: '#fff7ed', 
                       color: '#9a3412', 
@@ -1697,24 +1615,6 @@ function App() {
                     }}>
                       ID: {identityNumber}
                     </span>
-                  ) : currentWallet === 'ii' && (
-                    <button
-                      onClick={async () => {
-                        const manualId = prompt('Enter your Internet Identity number (e.g., 2103801):');
-                        if (manualId && !isNaN(manualId)) {
-                          const idNum = Number(manualId);
-                          setIdentityNumber(idNum);
-                          // Store in localStorage for persistence
-                          localStorage.setItem('icp_identity_number', idNum.toString());
-                          showMessage('Identity number set!', 'success');
-                        }
-                      }}
-                      className="btn-refresh-small"
-                      title="Set identity number manually"
-                      style={{ fontSize: '0.75rem', padding: '4px 8px' }}
-                    >
-                      Set ID
-                    </button>
                   )}
                   <button
                     onClick={() => copyToClipboard(principal)}
@@ -1723,66 +1623,7 @@ function App() {
                   >
                     📋
                   </button>
-                  {principal && (
-                    <a
-                      href={`https://dashboard.internetcomputer.org/principal/${encodeURIComponent(principal)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn-refresh-small"
-                      style={{ textDecoration: 'none', color: 'inherit' }}
-                      title="View on ICP Explorer"
-                    >
-                      🔍
-                    </a>
-                  )}
                 </div>
-                {currentWallet === 'ii' && !identityNumber && (
-                  <small style={{ color: '#999', fontSize: '0.75rem', marginTop: '4px', display: 'block' }}>
-                    Click "Set ID" to manually enter your Internet Identity number
-                  </small>
-                )}
-                {principal && (() => {
-                  const explorerUrls = getExplorerUrls(principal);
-                  return (
-                    <div style={{ marginTop: '8px' }}>
-                      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center', marginBottom: '4px' }}>
-                        {explorerUrls.map((explorer, index) => (
-                          <React.Fragment key={explorer.name}>
-                            <a
-                              href={explorer.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{ color: '#1a1a1a', textDecoration: 'underline', fontSize: '0.85rem' }}
-                              onClick={(e) => {
-                                logICPEvent('explorer_clicked', { explorer: explorer.name, principal });
-                                // Try to open, with fallback
-                                try {
-                                  // Link will open naturally
-                                } catch (error) {
-                                  console.error(`Failed to open ${explorer.name}:`, error);
-                                  e.preventDefault();
-                                  // Fallback: copy to clipboard
-                                  navigator.clipboard.writeText(explorer.url).then(() => {
-                                    showMessage(`Link copied to clipboard: ${explorer.url}`, 'success');
-                                  });
-                                }
-                              }}
-                              title={explorer.description}
-                            >
-                              {explorer.icon} {explorer.name}
-                            </a>
-                            {index < explorerUrls.length - 1 && (
-                              <span style={{ fontSize: '0.85rem', color: '#999' }}>|</span>
-                            )}
-                          </React.Fragment>
-                        ))}
-                      </div>
-                      <small style={{ fontSize: '0.75rem', color: '#999', fontStyle: 'italic', display: 'block', marginTop: '4px' }}>
-                        💡 Note: Principals may not appear in explorers if they haven't had any on-chain transactions yet.
-                      </small>
-                    </div>
-                  );
-                })()}
               </div>
               {accountInfo ? (
                 <>
@@ -1903,54 +1744,80 @@ function App() {
             </div>
           </div>
 
+          {/* Step-by-Step Flow */}
           {!accountInfo ? (
-            <div className="card">
-              <h2>Register Account</h2>
+            <>
+              {/* Step 1: Connect Identity - Already Completed */}
+              {isConnected && (
+                <div className="card step-card" style={{ borderLeft: '4px solid #10b981', background: '#f0fdf4' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                    <div style={{ 
+                      background: '#10b981', 
+                      color: 'white', 
+                      borderRadius: '50%', 
+                      width: '32px', 
+                      height: '32px', 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'center',
+                      fontWeight: 'bold',
+                      fontSize: '1.1rem'
+                    }}>
+                      ✓
+                    </div>
+                    <h2 style={{ margin: 0, color: '#10b981' }}>Step 1: Connect Identity</h2>
+                  </div>
+                  <p style={{ margin: 0, color: '#666', fontSize: '0.9rem', marginBottom: '8px' }}>
+                    ✅ Identity (Principal ID) connected successfully. You're ready to register your account.
+                  </p>
+                  <div style={{ background: '#ecfdf5', padding: '10px', borderRadius: '6px', border: '1px solid #a7f3d0', fontSize: '0.85rem', color: '#065f46' }}>
+                    <strong style={{ display: 'block', marginBottom: '4px' }}>🔒 Privacy Note:</strong>
+                    <p style={{ margin: 0, lineHeight: '1.5' }}>
+                      Your Principal ID is used for authentication. Wallet addresses (where tokens are stored) are derived from your Principal but cannot be reverse-looked up, providing privacy-preserving separation between your identity and your assets.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Step 2: Register Account */}
+              <div className="card step-card" id="register" style={{ borderLeft: '4px solid #F7931A' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                  <div style={{ 
+                    background: '#F7931A', 
+                    color: 'white', 
+                    borderRadius: '50%', 
+                    width: '32px', 
+                    height: '32px', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center',
+                    fontWeight: 'bold',
+                    fontSize: '1.1rem'
+                  }}>
+                    2
+                  </div>
+                  <div>
+                    <h2 style={{ margin: 0 }}>Step 2: Register Account</h2>
+                    <p style={{ margin: '4px 0 0 0', color: '#666', fontSize: '0.85rem' }}>
+                      Set up your dead man switch with timeout duration and beneficiary
+                    </p>
+                  </div>
+                </div>
+                <div style={{ background: '#fff7ed', padding: '12px', borderRadius: '6px', marginBottom: '16px', border: '1px solid #fed7aa' }}>
+                  <strong style={{ color: '#9a3412', display: 'block', marginBottom: '4px' }}>📋 Instructions:</strong>
+                  <ol style={{ margin: '8px 0 0 0', paddingLeft: '20px', color: '#9a3412', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                    <li>Set your timeout duration (how long before automatic transfer)</li>
+                    <li>Enter beneficiary principal (who receives funds if timeout occurs)</li>
+                    <li>Click "Register" to create your account</li>
+                  </ol>
+                </div>
               <form onSubmit={handleRegister}>
                 <div className="form-group">
                   <label>Timeout Duration</label>
-                  <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
-                    <button
-                      type="button"
-                      onClick={() => setRegisterForm({...registerForm, timeoutDuration: 3600})}
-                      className="btn-refresh-small"
-                      style={{ padding: '6px 12px' }}
-                    >
-                      1 Hour
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setRegisterForm({...registerForm, timeoutDuration: 86400})}
-                      className="btn-refresh-small"
-                      style={{ padding: '6px 12px' }}
-                    >
-                      1 Day
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setRegisterForm({...registerForm, timeoutDuration: 604800})}
-                      className="btn-refresh-small"
-                      style={{ padding: '6px 12px' }}
-                    >
-                      1 Week
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setRegisterForm({...registerForm, timeoutDuration: 2592000})}
-                      className="btn-refresh-small"
-                      style={{ padding: '6px 12px' }}
-                    >
-                      1 Month
-                    </button>
-                  </div>
-                  <input
-                    type="number"
-                    value={registerForm.timeoutDuration}
-                    onChange={(e) => setRegisterForm({...registerForm, timeoutDuration: parseInt(e.target.value) || 3600})}
-                    min="60"
-                    required
+                  <TimeoutCalendar
+                    timeoutDuration={registerForm.timeoutDuration}
+                    onChange={(seconds) => setRegisterForm({...registerForm, timeoutDuration: seconds})}
                   />
-                  <small>Time before automatic transfer: {formatDuration(registerForm.timeoutDuration)}</small>
                 </div>
                 <div className="form-group">
                   <label>Beneficiary Principal</label>
@@ -1959,7 +1826,7 @@ function App() {
                     type="text"
                     value={registerForm.beneficiary}
                       onChange={(e) => handleBeneficiaryChange(e.target.value)}
-                      placeholder="e.g., 2gvlb-ekff7-b4m4a-g64bc-owccg-syhdp-375ir-5ry2x-hzryb-qbj5a-qae (wallet) or rrkah-fqaaa-aaaaa-aaaaq-cai (canister)"
+                      placeholder="e.g., 2gvlb-ekff7-b4m4a-g64bc-owccg-syhdp-375ir-5ry2x-hzryb-qbj5a-qae (user/wallet) or rrkah-fqaaa-aaaaa-aaaaq-cai (canister)"
                     required
                       style={{ 
                         flex: 1,
@@ -1976,17 +1843,6 @@ function App() {
                         }
                       }}
                     />
-                    {principal && (
-                      <button
-                        type="button"
-                        onClick={() => setRegisterForm({...registerForm, beneficiary: principal})}
-                        className="btn-refresh-small"
-                        title="Use my principal"
-                        style={{ padding: '10px 16px', whiteSpace: 'nowrap' }}
-                      >
-                        Use My Principal
-                      </button>
-                    )}
                 </div>
                   <small>
                     The principal that will receive funds if you don't send a heartbeat in time.
@@ -2046,9 +1902,342 @@ function App() {
                   {loading ? 'Registering...' : 'Register'}
                 </button>
               </form>
-            </div>
+              </div>
+            </>
           ) : (
             <>
+              {/* Step 1 & 2: Completed */}
+              <div className="card step-card" style={{ borderLeft: '4px solid #10b981', background: '#f0fdf4' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+                  <div style={{ 
+                    background: '#10b981', 
+                    color: 'white', 
+                    borderRadius: '50%', 
+                    width: '28px', 
+                    height: '28px', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center',
+                    fontWeight: 'bold',
+                    fontSize: '0.9rem'
+                  }}>
+                    ✓
+                  </div>
+                  <span style={{ color: '#10b981', fontSize: '0.9rem', fontWeight: '500' }}>Step 1: Identity Connected</span>
+                </div>
+              </div>
+              <div className="card step-card" style={{ borderLeft: '4px solid #10b981', background: '#f0fdf4', marginTop: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+                  <div style={{ 
+                    background: '#10b981', 
+                    color: 'white', 
+                    borderRadius: '50%', 
+                    width: '28px', 
+                    height: '28px', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center',
+                    fontWeight: 'bold',
+                    fontSize: '0.9rem'
+                  }}>
+                    ✓
+                  </div>
+                  <span style={{ color: '#10b981', fontSize: '0.9rem', fontWeight: '500' }}>Step 2: Account Registered</span>
+                </div>
+              </div>
+
+              {/* Step 3: Deposit ckBTC */}
+              <div className="card step-card" id="deposit" style={{ borderLeft: '4px solid #3b82f6', marginTop: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                  <div style={{ 
+                    background: '#3b82f6', 
+                    color: 'white', 
+                    borderRadius: '50%', 
+                    width: '32px', 
+                    height: '32px', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center',
+                    fontWeight: 'bold',
+                    fontSize: '1.1rem'
+                  }}>
+                    3
+                  </div>
+                  <div>
+                    <h2 style={{ margin: 0 }}>Step 3: Deposit ckBTC</h2>
+                    <p style={{ margin: '4px 0 0 0', color: '#666', fontSize: '0.85rem' }}>
+                      Transfer ckBTC to the canister and record your deposit
+                    </p>
+                  </div>
+                </div>
+                <div style={{ background: '#eff6ff', padding: '12px', borderRadius: '6px', marginBottom: '16px', border: '1px solid #bfdbfe' }}>
+                  <strong style={{ color: '#1e40af', display: 'block', marginBottom: '4px' }}>📋 Instructions:</strong>
+                  <ol style={{ margin: '8px 0 0 0', paddingLeft: '20px', color: '#1e40af', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                    <li>Copy the canister address below</li>
+                    <li>Send ckBTC from your wallet to this address</li>
+                    <li>Enter the amount you transferred and click "Record Deposit"</li>
+                  </ol>
+                </div>
+                {canisterAddress && (
+                  <div className="form-group" style={{ marginBottom: '20px' }}>
+                    <label>Canister Address (Send ckBTC here):</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <code style={{ flex: 1, padding: '10px 12px', background: '#fafafa', border: '1px solid #e5e5e5', wordBreak: 'break-all' }}>
+                        {canisterAddress}
+                      </code>
+                      <button
+                        onClick={() => copyToClipboard(canisterAddress)}
+                        className="btn-refresh-small"
+                        title="Copy address"
+                        style={{ padding: '10px 12px' }}
+                      >
+                        📋
+                      </button>
+                    </div>
+                    <small>Send ckBTC to this canister address from your wallet</small>
+                    {canisterAddress && (
+                      <div style={{ marginTop: '8px' }}>
+                        <a
+                          href={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(canisterAddress)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ fontSize: '0.85rem', color: '#1a1a1a', textDecoration: 'underline' }}
+                        >
+                          📱 Show QR Code
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <form onSubmit={handleDeposit}>
+                  <div className="form-group">
+                    <label>Amount (smallest unit, 8 decimals)</label>
+                    <input
+                      type="number"
+                      value={depositAmount}
+                      onChange={(e) => setDepositAmount(e.target.value)}
+                      placeholder="1000000 = 0.01 ckBTC"
+                      required
+                    />
+                    <small>Enter the amount you transferred (e.g., 1000000 = 0.01 ckBTC)</small>
+                  </div>
+                  <button type="submit" className="btn btn-primary" disabled={loading}>
+                    {loading ? 'Processing...' : 'Record Deposit'}
+                  </button>
+                </form>
+              </div>
+
+              {/* Step 4: Send Heartbeats */}
+              <div className="card step-card" id="heartbeat" style={{ borderLeft: '4px solid #8b5cf6', marginTop: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                  <div style={{ 
+                    background: '#8b5cf6', 
+                    color: 'white', 
+                    borderRadius: '50%', 
+                    width: '32px', 
+                    height: '32px', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center',
+                    fontWeight: 'bold',
+                    fontSize: '1.1rem'
+                  }}>
+                    4
+                  </div>
+                  <div>
+                    <h2 style={{ margin: 0 }}>Step 4: Send Heartbeats</h2>
+                    <p style={{ margin: '4px 0 0 0', color: '#666', fontSize: '0.85rem' }}>
+                      Regularly send heartbeats to reset your timeout timer
+                    </p>
+                  </div>
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <small style={{ fontSize: '0.75rem', color: '#999' }}>Ctrl+H</small>
+                    <button
+                      onClick={() => {
+                        setAutoHeartbeatReminder(!autoHeartbeatReminder);
+                        localStorage.setItem('autoHeartbeatReminder', (!autoHeartbeatReminder).toString());
+                      }}
+                      className="btn-refresh-small"
+                      title="Toggle auto reminder"
+                      style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                    >
+                      {autoHeartbeatReminder ? '🔔' : '🔕'}
+                    </button>
+                  </div>
+                </div>
+                <div style={{ background: '#faf5ff', padding: '12px', borderRadius: '6px', marginBottom: '16px', border: '1px solid #e9d5ff' }}>
+                  <strong style={{ color: '#6b21a8', display: 'block', marginBottom: '4px' }}>📋 Instructions:</strong>
+                  <ul style={{ margin: '8px 0 0 0', paddingLeft: '20px', color: '#6b21a8', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                    <li>Click "Send Heartbeat" to reset your timeout timer</li>
+                    <li>Send heartbeats before your timeout expires to prevent automatic transfer</li>
+                    <li>Use keyboard shortcut <strong>Ctrl+H</strong> (or Cmd+H on Mac) for quick access</li>
+                    <li>Enable auto-reminder (🔔) to get notifications before timeout</li>
+                  </ul>
+                </div>
+                <button onClick={handleHeartbeat} className="btn btn-primary" disabled={loading}>
+                  {loading ? 'Sending...' : 'Send Heartbeat'}
+                </button>
+                {timeRemaining && timeRemaining < 3600 && (
+                  <div style={{ marginTop: '12px', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '4px', fontSize: '0.85rem', color: '#991b1b' }}>
+                    ⚠️ Less than 1 hour remaining! Send heartbeat now.
+                  </div>
+                )}
+              </div>
+
+              {/* Step 5: Monitor Status */}
+              <div className="card step-card" id="account-status" style={{ borderLeft: '4px solid #06b6d4', marginTop: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                  <div style={{ 
+                    background: '#06b6d4', 
+                    color: 'white', 
+                    borderRadius: '50%', 
+                    width: '32px', 
+                    height: '32px', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center',
+                    fontWeight: 'bold',
+                    fontSize: '1.1rem'
+                  }}>
+                    5
+                  </div>
+                  <div>
+                    <h2 style={{ margin: 0 }}>Step 5: Monitor Status</h2>
+                    <p style={{ margin: '4px 0 0 0', color: '#666', fontSize: '0.85rem' }}>
+                      Keep track of your account status and timeout information
+                    </p>
+                  </div>
+                </div>
+                <div style={{ background: '#ecfeff', padding: '12px', borderRadius: '6px', marginBottom: '16px', border: '1px solid #a5f3fc' }}>
+                  <strong style={{ color: '#164e63', display: 'block', marginBottom: '4px' }}>📋 What to Monitor:</strong>
+                  <ul style={{ margin: '8px 0 0 0', paddingLeft: '20px', color: '#164e63', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                    <li>Time until timeout - send heartbeat before it expires</li>
+                    <li>Account balance - track your deposited ckBTC</li>
+                    <li>Last heartbeat - verify your heartbeats are being recorded</li>
+                    <li>Beneficiary - ensure it's correct</li>
+                  </ul>
+                </div>
+                {/* Account Status Information */}
+                <div className="info-grid">
+                  {accountInfo ? (
+                    <>
+                      <div>
+                        <label>Status:</label>
+                        <span className="status-badge status-active">Registered</span>
+                      </div>
+                      {timeRemaining !== null && (
+                        <>
+                          <div>
+                            <label>Time Until Timeout:</label>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <strong style={{ 
+                                color: timeRemaining < 3600 ? '#ef4444' : timeRemaining < 86400 ? '#f59e0b' : '#F7931A',
+                                fontSize: '1.1rem'
+                              }}>
+                                {formatTimeRemaining(timeRemaining)}
+                              </strong>
+                              {timeRemaining < 3600 && (
+                                <span style={{ fontSize: '0.8rem', color: '#ef4444' }}>⚠️ Urgent</span>
+                              )}
+                            </div>
+                          </div>
+                          {timeRemaining < 3600 && (
+                            <div className="timeout-urgent">
+                              <strong style={{ color: '#ef4444', display: 'block', marginBottom: '4px' }}>
+                                ⚠️ URGENT: Timeout Approaching
+                              </strong>
+                              <p style={{ margin: 0, fontSize: '0.85rem', color: '#991b1b' }}>
+                                You have less than 1 hour remaining. Send a heartbeat immediately to prevent automatic transfer to your beneficiary.
+                              </p>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      <div>
+                        <label>Tracked Balance:</label>
+                        <div>
+                          <strong>{formatBalance(accountInfo.balance)} ckBTC</strong>
+                          {ckbtcPrice?.price && (
+                            <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '4px' }}>
+                              ≈ ${((Number(accountInfo.balance) / 100_000_000) * ckbtcPrice.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      {ledgerBalance !== null && (
+                        <div>
+                          <label>Ledger Balance:</label>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            <div>
+                              <strong>{formatBalance(ledgerBalance)} ckBTC</strong>
+                              {ckbtcPrice?.price && (
+                                <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '4px' }}>
+                                  ≈ ${((Number(ledgerBalance) / 100_000_000) * ckbtcPrice.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </div>
+                              )}
+                            </div>
+                            <button 
+                              onClick={async () => {
+                                try {
+                                  const identity = await getIdentity();
+                                  const actor = await createActor(identity);
+                                  await loadLedgerBalance(actor);
+                                  showMessage('Balance refreshed!', 'success');
+                                } catch (error) {
+                                  showMessage('Failed to refresh balance', 'error');
+                                }
+                              }}
+                              className="btn-refresh-small"
+                              style={{ margin: 0 }}
+                            >
+                              ↻
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      <div>
+                        <label>Timeout Duration:</label>
+                        <span>{formatDuration(Number(accountInfo.timeout_duration_seconds))}</span>
+                      </div>
+                      <div>
+                        <label>Last Heartbeat:</label>
+                        <span>{formatTime(accountInfo.last_heartbeat)}</span>
+                      </div>
+                      <div>
+                        <label>Beneficiary:</label>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                          <code style={{ flex: 1 }}>
+                            {accountInfo.beneficiary?.toText ? accountInfo.beneficiary.toText() : String(accountInfo.beneficiary)}
+                          </code>
+                          <button
+                            onClick={() => copyToClipboard(accountInfo.beneficiary?.toText ? accountInfo.beneficiary.toText() : String(accountInfo.beneficiary))}
+                            className="btn-refresh-small"
+                            title="Copy beneficiary"
+                          >
+                            📋
+                          </button>
+                          <a
+                            href={`https://dashboard.internetcomputer.org/principal/${encodeURIComponent(accountInfo.beneficiary?.toText ? accountInfo.beneficiary.toText() : String(accountInfo.beneficiary))}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="btn-refresh-small"
+                            style={{ textDecoration: 'none', color: 'inherit' }}
+                            title="View on ICP Explorer"
+                          >
+                            🔍
+                          </a>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div>
+                      <label>Status:</label>
+                      <span className="status-badge status-inactive">Not Registered</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               <div className="card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                   <h2 style={{ margin: 0 }}>Send Heartbeat</h2>
@@ -2354,42 +2543,15 @@ function App() {
         </div>
       </footer>
 
-      {/* Info Modal - Rendered at app root level */}
-      {showInfoTooltip && (
-        <div 
-          className="info-modal-overlay"
-          onClick={() => setShowInfoTooltip(false)}
-        >
-          <div 
-            className="info-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="info-modal-header">
-              <h3>What is ICP: In Case of Passing?</h3>
-              <button
-                onClick={() => setShowInfoTooltip(false)}
-                className="info-modal-close"
-                title="Close"
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="info-modal-content">
-              <p>
-                A decentralized dead man switch on the Internet Computer Protocol (ICP) that automatically transfers ckBTC funds to a beneficiary if you stop sending heartbeats within a specified timeout period.
-              </p>
-              <p>
-                <strong>How it works:</strong> Register with a timeout duration and beneficiary address. Send periodic heartbeats to indicate you're active. If you fail to send a heartbeat within the timeout period, your funds are automatically transferred to the beneficiary.
-              </p>
-              <p>
-                <strong>Use cases:</strong> Estate planning, emergency fund management, or ensuring funds aren't lost if you become inactive.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+
+      </div>
+
+      {/* Info Modal */}
+      <InfoModal 
+        show={showInfoTooltip} 
+        onClose={() => setShowInfoTooltip(false)} 
+      />
+    </ErrorBoundary>
   );
 }
 
