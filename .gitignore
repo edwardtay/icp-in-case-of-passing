@@ -41,6 +41,9 @@ dist/
 build/
 *.tsbuildinfo
 
+# Vercel
+.vercel
+
 # Personal/Private files (not for GitHub)
 private/
 # Keep private folder structure but ignore contents

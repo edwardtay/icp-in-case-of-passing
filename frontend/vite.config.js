@@ -8,6 +8,18 @@ export default defineConfig({
     host: true,
     open: true
   },
+  build: {
+    outDir: 'dist',
+    assetsDir: 'assets',
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'dfinity': ['@dfinity/agent', '@dfinity/auth-client', '@dfinity/candid', '@dfinity/principal'],
+        },
+      },
+    },
+  },
   define: {
     global: 'globalThis',
   },
