@@ -48,3 +48,5 @@ echo "   dfx identity use default          # Your main account"
 echo "   dfx identity use $IDENTITY_NAME  # Beneficiary account"
 echo ""
 
+
+

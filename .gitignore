@@ -58,3 +58,5 @@ private/troubleshooting/
 *.backup
 *~
 
+canister_ids.json
+frontend/.env.production
