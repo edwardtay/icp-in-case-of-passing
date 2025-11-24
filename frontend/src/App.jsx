@@ -14,7 +14,12 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import AddressBalanceChecker from './components/AddressBalanceChecker';
 import InfoModal from './components/InfoModal';
 import TimeoutCalendar from './components/TimeoutCalendar';
+import RegistrationForm from './components/RegistrationForm';
+import HeartbeatButton from './components/HeartbeatButton';
+import AccountDashboard from './components/AccountDashboard';
+import TransactionHistory from './components/TransactionHistory';
 import './App.css';
+import './components.css';
 
 function App() {
   const [isConnected, setIsConnected] = useState(false);
@@ -334,7 +339,8 @@ function App() {
               }
             }
           } catch (e) {
-            if (e.name !== 'AbortError') {
+            // Silently handle network errors (common in local dev)
+            if (e.name !== 'AbortError' && !e.message?.includes('Failed to fetch')) {
               console.warn('CoinCap API failed:', e.message);
             }
           }
@@ -376,14 +382,20 @@ function App() {
               throw new Error('No price data available from any source');
             }
           } catch (finalError) {
-            console.error('Final price fetch attempt failed:', finalError);
+            // Only log if it's not a network error (common in local dev)
+            if (!finalError.message?.includes('Failed to fetch')) {
+              console.error('Final price fetch attempt failed:', finalError);
+            }
             // Even if all APIs fail, we can show a message that ckBTC = BTC
             // But don't throw - let the error handler deal with it
             throw new Error('Unable to fetch price. ckBTC is 1:1 with Bitcoin.');
           }
         }
       } catch (error) {
-        console.error('Price fetch error:', error);
+        // Only log error if it's not a network/CORS issue (common in local dev)
+        if (!error.message.includes('Failed to fetch') && !error.message.includes('CORS')) {
+          console.error('Price fetch error:', error);
+        }
         const errorMsg = error.message || 'Unable to fetch price data';
         setPriceError(errorMsg);
         
@@ -454,8 +466,8 @@ function App() {
                 setIsConnected(true);
                 // Load identity number
                 loadIdentityNumber(currentPrincipal).catch(e => console.warn('Failed to load identity number on restore:', e));
-                // Load account info in background
-                loadAccountInfo().catch(e => console.warn('Failed to load account info on restore:', e));
+                // Load account info in background - pass identity directly to avoid state timing issues
+                loadAccountInfo(identity).catch(e => console.warn('Failed to load account info on restore:', e));
                 return;
               } else {
                 console.log('Internet Identity: Principal mismatch, clearing session');
@@ -523,9 +535,9 @@ function App() {
         }
       }
       
-      // Load account info
+      // Load account info - pass identity directly to avoid state timing issues
       try {
-        await loadAccountInfo();
+        await loadAccountInfo(result.identity);
       } catch (e) {
         console.warn('Failed to load account info:', e);
         // Don't fail the connection if account info fails
@@ -573,9 +585,9 @@ function App() {
     showMessage('Disconnected', 'success');
   };
 
-  const loadAccountInfo = async () => {
+  const loadAccountInfo = async (providedIdentity = null) => {
     try {
-      let identity = currentIdentity;
+      let identity = providedIdentity || currentIdentity;
       
       // If no identity but we're connected, try to get it
       if (!identity && currentWallet === 'ii') {
@@ -600,6 +612,7 @@ function App() {
       const actor = await createActor(identity);
       const result = await actor.get_account_info();
       if ('ok' in result) {
+        console.log('Account info loaded successfully, user is registered');
         setAccountInfo(result.ok);
         // Load ledger balance
         loadLedgerBalance(actor);
@@ -617,6 +630,7 @@ function App() {
           console.warn('Could not load transaction history:', e);
         }
       } else {
+        console.log('User not registered yet');
         setAccountInfo(null);
         setTransactionHistory([]);
       }
@@ -709,8 +723,10 @@ function App() {
         return;
       }
 
-      // Internet Identity canister ID (mainnet)
-      const II_CANISTER_ID = 'rdmx6-jaaaa-aaaaa-aaadq-cai';
+      // Internet Identity canister ID (use local for dev, mainnet for production)
+      const II_CANISTER_ID = import.meta.env.DEV 
+        ? 'uzt4z-lp777-77774-qaabq-cai'  // Local Internet Identity
+        : 'rdmx6-jaaaa-aaaaa-aaadq-cai'; // Mainnet Internet Identity
       
       const { Principal } = await import('@dfinity/principal');
       const { Actor, HttpAgent } = await import('@dfinity/agent');
@@ -894,7 +910,24 @@ function App() {
       }
     } catch (error) {
       let errorMsg = error.message || 'Registration failed';
-      if (error.message && error.message.includes('Invalid text')) {
+      
+      // Check for certificate/signature errors (common after replica restart)
+      if (error.message && (
+        error.message.includes('Invalid delegation') ||
+        error.message.includes('Invalid canister signature') ||
+        error.message.includes('certificate verification failed') ||
+        error.message.includes('threshold signature')
+      )) {
+        // In local dev, this is expected - production II doesn't work with local replica
+        if (import.meta.env.DEV) {
+          errorMsg = 'Local Development: Registration via UI requires mainnet deployment. ' +
+                     'Production Internet Identity delegations cannot be verified by local replica. ' +
+                     'For local testing, use CLI: dfx canister call deadman_switch register \'(record { timeout_duration_seconds = 60 : nat64; beneficiary = principal "YOUR-PRINCIPAL"; })\'';
+        } else {
+          errorMsg = 'Certificate verification failed. This usually happens after the replica restarts. Please disconnect and reconnect your wallet to refresh your identity session.';
+        }
+        console.error('Certificate error detected:', error);
+      } else if (error.message && error.message.includes('Invalid text')) {
         errorMsg = 'Invalid beneficiary principal format. Please check and try again.';
       } else if (error.message && error.message.includes('anonymous')) {
         errorMsg = 'Cannot register with anonymous principal. Please connect your wallet.';
@@ -1201,13 +1234,30 @@ function App() {
                           </div>
                           <div className="metadata-item">
                             <label>Tracked Balance:</label>
-                            <div className="metadata-value">
-                              <strong>{formatBalance(accountInfo.balance)} ckBTC</strong>
-                              {ckbtcPrice?.price && (
-                                <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '2px' }}>
-                                  ≈ ${((Number(accountInfo.balance) / 100_000_000) * ckbtcPrice.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                </div>
-                              )}
+                            <div className="metadata-value" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <div>
+                                <strong>{formatBalance(accountInfo.balance)} ckBTC</strong>
+                                {ckbtcPrice?.price && (
+                                  <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '2px' }}>
+                                    ≈ ${((Number(accountInfo.balance) / 100_000_000) * ckbtcPrice.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  </div>
+                                )}
+                              </div>
+                              <button 
+                                onClick={async () => {
+                                  try {
+                                    await loadAccountInfo();
+                                    showMessage('Tracked balance refreshed!', 'success');
+                                  } catch (error) {
+                                    showMessage('Failed to refresh balance', 'error');
+                                  }
+                                }}
+                                className="btn-refresh-small"
+                                title="Refresh tracked balance"
+                                style={{ margin: 0 }}
+                              >
+                                ↻
+                              </button>
                             </div>
                           </div>
                           {ledgerBalance !== null && (
@@ -1780,128 +1830,56 @@ function App() {
               )}
 
               {/* Step 2: Register Account */}
-              <div className="card step-card" id="register" style={{ borderLeft: '4px solid #F7931A' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-                  <div style={{ 
-                    background: '#F7931A', 
-                    color: 'white', 
-                    borderRadius: '50%', 
-                    width: '32px', 
-                    height: '32px', 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'center',
-                    fontWeight: 'bold',
-                    fontSize: '1.1rem'
-                  }}>
-                    2
-                  </div>
-                  <div>
-                    <h2 style={{ margin: 0 }}>Step 2: Register Account</h2>
-                    <p style={{ margin: '4px 0 0 0', color: '#666', fontSize: '0.85rem' }}>
-                      Set up your dead man switch with timeout duration and beneficiary
-                    </p>
-                  </div>
-                </div>
-                <div style={{ background: '#fff7ed', padding: '12px', borderRadius: '6px', marginBottom: '16px', border: '1px solid #fed7aa' }}>
-                  <strong style={{ color: '#9a3412', display: 'block', marginBottom: '4px' }}>📋 Instructions:</strong>
-                  <ol style={{ margin: '8px 0 0 0', paddingLeft: '20px', color: '#9a3412', fontSize: '0.9rem', lineHeight: '1.6' }}>
-                    <li>Set your timeout duration (how long before automatic transfer)</li>
-                    <li>Enter beneficiary principal (who receives funds if timeout occurs)</li>
-                    <li>Click "Register" to create your account</li>
-                  </ol>
-                </div>
-              <form onSubmit={handleRegister}>
-                <div className="form-group">
-                  <label>Timeout Duration</label>
-                  <TimeoutCalendar
-                    timeoutDuration={registerForm.timeoutDuration}
-                    onChange={(seconds) => setRegisterForm({...registerForm, timeoutDuration: seconds})}
-                  />
-                </div>
-                <div className="form-group">
-                  <label>Beneficiary Principal</label>
-                  <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                  <input
-                    type="text"
-                    value={registerForm.beneficiary}
-                      onChange={(e) => handleBeneficiaryChange(e.target.value)}
-                      placeholder="e.g., 2gvlb-ekff7-b4m4a-g64bc-owccg-syhdp-375ir-5ry2x-hzryb-qbj5a-qae (user/wallet) or rrkah-fqaaa-aaaaa-aaaaq-cai (canister)"
-                    required
-                      style={{ 
-                        flex: 1,
-                        borderColor: beneficiaryError ? '#ef4444' : undefined
-                      }}
-                      onBlur={async () => {
-                        if (registerForm.beneficiary) {
-                          const validation = await validatePrincipalEnhanced(registerForm.beneficiary, { checkActivity: false });
-                          setBeneficiaryError(validation.error || '');
-                          if (validation.valid && validation.warning) {
-                            // Show warning but don't block
-                            console.warn(validation.warning);
-                          }
+              <div id="register">
+                <RegistrationForm
+                  onRegister={async (formData) => {
+                    setLoading(true);
+                    try {
+                      const identity = await getIdentity();
+                      const actor = await createActor(identity);
+                      const { Principal } = await import('@dfinity/principal');
+                      const beneficiaryPrincipal = Principal.fromText(formData.beneficiary.trim());
+                      
+                      const result = await actor.register({
+                        timeout_duration_seconds: BigInt(formData.timeoutDuration),
+                        beneficiary: beneficiaryPrincipal
+                      });
+                      
+                      if ('ok' in result) {
+                        showMessage(result.ok, 'success');
+                        await loadAccountInfo();
+                      } else {
+                        const errorMsg = result.err || 'Registration failed';
+                        showMessage(errorMsg, 'error');
+                      }
+                    } catch (error) {
+                      let errorMsg = error.message || 'Registration failed';
+                      
+                      // Check for certificate/signature errors
+                      if (error.message && (
+                        error.message.includes('Invalid delegation') ||
+                        error.message.includes('Invalid canister signature') ||
+                        error.message.includes('certificate verification failed') ||
+                        error.message.includes('threshold signature')
+                      )) {
+                        // In local dev, this is expected - production II doesn't work with local replica
+                        if (import.meta.env.DEV) {
+                          errorMsg = 'Local Development: Registration via UI requires mainnet deployment. ' +
+                                     'For local testing, use CLI commands (see terminal).';
+                        } else {
+                          errorMsg = 'Certificate verification failed. Please disconnect and reconnect your wallet to refresh your identity session.';
                         }
-                      }}
-                    />
-                </div>
-                  <small>
-                    The principal that will receive funds if you don't send a heartbeat in time.
-                    <br />
-                    <strong>User/Wallet Principal (recommended):</strong> Long format like <code style={{ fontSize: '0.75rem', background: '#f5f5f5', padding: '2px 4px' }}>2gvlb-ekff7-b4m4a-g64bc-owccg-syhdp-375ir-5ry2x-hzryb-qbj5a-qae</code>
-                    <br />
-                    <strong>Canister Principal:</strong> Shorter format like <code style={{ fontSize: '0.75rem', background: '#f5f5f5', padding: '2px 4px' }}>rrkah-fqaaa-aaaaa-aaaaq-cai</code>
-                    <br />
-                    You can use your own wallet principal, another user's principal, or a canister principal.
-                    {beneficiaryError && (
-                      <span style={{ color: '#ef4444', fontSize: '0.85rem', display: 'block', marginTop: '4px' }}>
-                        ⚠️ {beneficiaryError}
-                      </span>
-                    )}
-                    {registerForm.beneficiary && !beneficiaryError && (
-                      <>
-                        <br />
-                        <a
-                          href={`https://dashboard.internetcomputer.org/principal/${encodeURIComponent(registerForm.beneficiary.trim())}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: '#1a1a1a', textDecoration: 'underline', fontSize: '0.85rem' }}
-                        >
-                          🔍 View on ICP Explorer
-                        </a>
-                        {' | '}
-                        <a
-                          href={`https://ic.rocks/principal/${encodeURIComponent(registerForm.beneficiary.trim())}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: '#1a1a1a', textDecoration: 'underline', fontSize: '0.85rem' }}
-                        >
-                          ic.rocks
-                        </a>
-                        {' | '}
-                        <a
-                          href={`https://icscan.io/principal/${encodeURIComponent(registerForm.beneficiary.trim())}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: '#1a1a1a', textDecoration: 'underline', fontSize: '0.85rem' }}
-                        >
-                          ICScan
-                        </a>
-                        <br />
-                        <span style={{ fontSize: '0.75rem', color: '#999', fontStyle: 'italic' }}>
-                          Note: Principals may not appear on explorer if they haven't had any transactions yet.
-                        </span>
-                      </>
-                    )}
-                  </small>
-                </div>
-                <button 
-                  type="submit" 
-                  className="btn btn-primary" 
-                  disabled={loading || !!beneficiaryError || !registerForm.beneficiary.trim()}
-                >
-                  {loading ? 'Registering...' : 'Register'}
-                </button>
-              </form>
+                        console.error('Certificate error detected:', error);
+                      }
+                      showMessage(`Registration failed: ${errorMsg}`, 'error');
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                  loading={loading}
+                  accountInfo={accountInfo}
+                  showMessage={showMessage}
+                />
               </div>
             </>
           ) : (
@@ -2028,243 +2006,72 @@ function App() {
               </div>
 
               {/* Step 4: Send Heartbeats */}
-              <div className="card step-card" id="heartbeat" style={{ borderLeft: '4px solid #8b5cf6', marginTop: '12px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-                  <div style={{ 
-                    background: '#8b5cf6', 
-                    color: 'white', 
-                    borderRadius: '50%', 
-                    width: '32px', 
-                    height: '32px', 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'center',
-                    fontWeight: 'bold',
-                    fontSize: '1.1rem'
-                  }}>
-                    4
-                  </div>
-                  <div>
-                    <h2 style={{ margin: 0 }}>Step 4: Send Heartbeats</h2>
-                    <p style={{ margin: '4px 0 0 0', color: '#666', fontSize: '0.85rem' }}>
-                      Regularly send heartbeats to reset your timeout timer
-                    </p>
-                  </div>
-                  <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <small style={{ fontSize: '0.75rem', color: '#999' }}>Ctrl+H</small>
-                    <button
-                      onClick={() => {
-                        setAutoHeartbeatReminder(!autoHeartbeatReminder);
-                        localStorage.setItem('autoHeartbeatReminder', (!autoHeartbeatReminder).toString());
-                      }}
-                      className="btn-refresh-small"
-                      title="Toggle auto reminder"
-                      style={{ padding: '4px 8px', fontSize: '0.75rem' }}
-                    >
-                      {autoHeartbeatReminder ? '🔔' : '🔕'}
-                    </button>
-                  </div>
-                </div>
-                <div style={{ background: '#faf5ff', padding: '12px', borderRadius: '6px', marginBottom: '16px', border: '1px solid #e9d5ff' }}>
-                  <strong style={{ color: '#6b21a8', display: 'block', marginBottom: '4px' }}>📋 Instructions:</strong>
-                  <ul style={{ margin: '8px 0 0 0', paddingLeft: '20px', color: '#6b21a8', fontSize: '0.9rem', lineHeight: '1.6' }}>
-                    <li>Click "Send Heartbeat" to reset your timeout timer</li>
-                    <li>Send heartbeats before your timeout expires to prevent automatic transfer</li>
-                    <li>Use keyboard shortcut <strong>Ctrl+H</strong> (or Cmd+H on Mac) for quick access</li>
-                    <li>Enable auto-reminder (🔔) to get notifications before timeout</li>
-                  </ul>
-                </div>
-                <button onClick={handleHeartbeat} className="btn btn-primary" disabled={loading}>
-                  {loading ? 'Sending...' : 'Send Heartbeat'}
-                </button>
-                {timeRemaining && timeRemaining < 3600 && (
-                  <div style={{ marginTop: '12px', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '4px', fontSize: '0.85rem', color: '#991b1b' }}>
-                    ⚠️ Less than 1 hour remaining! Send heartbeat now.
-                  </div>
-                )}
+              <div id="heartbeat" style={{ marginTop: '12px' }}>
+                <HeartbeatButton
+                  onHeartbeat={async () => {
+                    const identity = await getIdentity();
+                    const actor = await createActor(identity);
+                    const result = await actor.heartbeat();
+                    
+                    if ('ok' in result) {
+                      await loadAccountInfo();
+                      return result.ok;
+                    } else {
+                      throw new Error(result.err);
+                    }
+                  }}
+                  accountInfo={accountInfo}
+                  loading={loading}
+                  showMessage={showMessage}
+                />
               </div>
 
-              {/* Step 5: Monitor Status */}
-              <div className="card step-card" id="account-status" style={{ borderLeft: '4px solid #06b6d4', marginTop: '12px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-                  <div style={{ 
-                    background: '#06b6d4', 
-                    color: 'white', 
-                    borderRadius: '50%', 
-                    width: '32px', 
-                    height: '32px', 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'center',
-                    fontWeight: 'bold',
-                    fontSize: '1.1rem'
-                  }}>
-                    5
-                  </div>
-                  <div>
-                    <h2 style={{ margin: 0 }}>Step 5: Monitor Status</h2>
-                    <p style={{ margin: '4px 0 0 0', color: '#666', fontSize: '0.85rem' }}>
-                      Keep track of your account status and timeout information
-                    </p>
-                  </div>
-                </div>
-                <div style={{ background: '#ecfeff', padding: '12px', borderRadius: '6px', marginBottom: '16px', border: '1px solid #a5f3fc' }}>
-                  <strong style={{ color: '#164e63', display: 'block', marginBottom: '4px' }}>📋 What to Monitor:</strong>
-                  <ul style={{ margin: '8px 0 0 0', paddingLeft: '20px', color: '#164e63', fontSize: '0.9rem', lineHeight: '1.6' }}>
-                    <li>Time until timeout - send heartbeat before it expires</li>
-                    <li>Account balance - track your deposited ckBTC</li>
-                    <li>Last heartbeat - verify your heartbeats are being recorded</li>
-                    <li>Beneficiary - ensure it's correct</li>
-                  </ul>
-                </div>
-                {/* Account Status Information */}
-                <div className="info-grid">
-                  {accountInfo ? (
-                    <>
-                      <div>
-                        <label>Status:</label>
-                        <span className="status-badge status-active">Registered</span>
-                      </div>
-                      {timeRemaining !== null && (
-                        <>
-                          <div>
-                            <label>Time Until Timeout:</label>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <strong style={{ 
-                                color: timeRemaining < 3600 ? '#ef4444' : timeRemaining < 86400 ? '#f59e0b' : '#F7931A',
-                                fontSize: '1.1rem'
-                              }}>
-                                {formatTimeRemaining(timeRemaining)}
-                              </strong>
-                              {timeRemaining < 3600 && (
-                                <span style={{ fontSize: '0.8rem', color: '#ef4444' }}>⚠️ Urgent</span>
-                              )}
-                            </div>
-                          </div>
-                          {timeRemaining < 3600 && (
-                            <div className="timeout-urgent">
-                              <strong style={{ color: '#ef4444', display: 'block', marginBottom: '4px' }}>
-                                ⚠️ URGENT: Timeout Approaching
-                              </strong>
-                              <p style={{ margin: 0, fontSize: '0.85rem', color: '#991b1b' }}>
-                                You have less than 1 hour remaining. Send a heartbeat immediately to prevent automatic transfer to your beneficiary.
-                              </p>
-                            </div>
-                          )}
-                        </>
-                      )}
-                      <div>
-                        <label>Tracked Balance:</label>
-                        <div>
-                          <strong>{formatBalance(accountInfo.balance)} ckBTC</strong>
-                          {ckbtcPrice?.price && (
-                            <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '4px' }}>
-                              ≈ ${((Number(accountInfo.balance) / 100_000_000) * ckbtcPrice.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      {ledgerBalance !== null && (
-                        <div>
-                          <label>Ledger Balance:</label>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                            <div>
-                              <strong>{formatBalance(ledgerBalance)} ckBTC</strong>
-                              {ckbtcPrice?.price && (
-                                <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '4px' }}>
-                                  ≈ ${((Number(ledgerBalance) / 100_000_000) * ckbtcPrice.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                </div>
-                              )}
-                            </div>
-                            <button 
-                              onClick={async () => {
-                                try {
-                                  const identity = await getIdentity();
-                                  const actor = await createActor(identity);
-                                  await loadLedgerBalance(actor);
-                                  showMessage('Balance refreshed!', 'success');
-                                } catch (error) {
-                                  showMessage('Failed to refresh balance', 'error');
-                                }
-                              }}
-                              className="btn-refresh-small"
-                              style={{ margin: 0 }}
-                            >
-                              ↻
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                      <div>
-                        <label>Timeout Duration:</label>
-                        <span>{formatDuration(Number(accountInfo.timeout_duration_seconds))}</span>
-                      </div>
-                      <div>
-                        <label>Last Heartbeat:</label>
-                        <span>{formatTime(accountInfo.last_heartbeat)}</span>
-                      </div>
-                      <div>
-                        <label>Beneficiary:</label>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                          <code style={{ flex: 1 }}>
-                            {accountInfo.beneficiary?.toText ? accountInfo.beneficiary.toText() : String(accountInfo.beneficiary)}
-                          </code>
-                          <button
-                            onClick={() => copyToClipboard(accountInfo.beneficiary?.toText ? accountInfo.beneficiary.toText() : String(accountInfo.beneficiary))}
-                            className="btn-refresh-small"
-                            title="Copy beneficiary"
-                          >
-                            📋
-                          </button>
-                          <a
-                            href={`https://dashboard.internetcomputer.org/principal/${encodeURIComponent(accountInfo.beneficiary?.toText ? accountInfo.beneficiary.toText() : String(accountInfo.beneficiary))}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="btn-refresh-small"
-                            style={{ textDecoration: 'none', color: 'inherit' }}
-                            title="View on ICP Explorer"
-                          >
-                            🔍
-                          </a>
-                        </div>
-                      </div>
-                    </>
-                  ) : (
-                    <div>
-                      <label>Status:</label>
-                      <span className="status-badge status-inactive">Not Registered</span>
-                    </div>
-                  )}
-                </div>
+              {/* Step 5: Account Dashboard */}
+              <div id="account-status" style={{ marginTop: '12px' }}>
+                <AccountDashboard
+                  accountInfo={accountInfo}
+                  ledgerBalance={ledgerBalance}
+                  onUpdateSettings={() => setShowUpdateSettings(true)}
+                  onWithdraw={() => setShowWithdraw(true)}
+                  showMessage={showMessage}
+                  onSetMockBalance={async () => {
+                    const currentBalance = accountInfo?.balance ? Number(accountInfo.balance) / 100_000_000 : 0;
+                    const amount = prompt(`Enter amount to ADD in ckBTC (e.g., 0.5 to add 0.5 ckBTC):\n\nCurrent balance: ${currentBalance.toFixed(8)} ckBTC`, '0.5');
+                    if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+                      showMessage('Invalid amount. Please enter a positive number.', 'error');
+                      return;
+                    }
+                    const amountSatoshi = BigInt(Math.floor(parseFloat(amount) * 100_000_000));
+                    setLoading(true);
+                    try {
+                      const identity = await getIdentity();
+                      const actor = await createActor(identity);
+                      const result = await actor.set_mock_balance(amountSatoshi);
+                      if ('ok' in result) {
+                        showMessage(result.ok, 'success');
+                        await loadAccountInfo(identity);
+                      } else {
+                        showMessage(`Failed: ${result.err}`, 'error');
+                      }
+                    } catch (error) {
+                      showMessage(`Error: ${error.message}`, 'error');
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                />
               </div>
 
-              <div className="card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                  <h2 style={{ margin: 0 }}>Send Heartbeat</h2>
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <small style={{ fontSize: '0.75rem', color: '#999' }}>Ctrl+H</small>
-                    <button
-                      onClick={() => {
-                        setAutoHeartbeatReminder(!autoHeartbeatReminder);
-                        localStorage.setItem('autoHeartbeatReminder', (!autoHeartbeatReminder).toString());
-                      }}
-                      className="btn-refresh-small"
-                      title="Toggle auto reminder"
-                      style={{ padding: '4px 8px', fontSize: '0.75rem' }}
-                    >
-                      {autoHeartbeatReminder ? '🔔' : '🔕'}
-                    </button>
-                  </div>
-                </div>
-                <p>Send a heartbeat to reset your timeout timer and prevent automatic transfer.</p>
-                <button onClick={handleHeartbeat} className="btn btn-primary" disabled={loading}>
-                  {loading ? 'Sending...' : 'Send Heartbeat'}
-                </button>
-                {timeRemaining && timeRemaining < 3600 && (
-                  <div style={{ marginTop: '12px', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '4px', fontSize: '0.85rem', color: '#991b1b' }}>
-                    ⚠️ Less than 1 hour remaining! Send heartbeat now.
-                  </div>
-                )}
+              {/* Transaction History */}
+              <div style={{ marginTop: '12px' }}>
+                <TransactionHistory
+                  accountInfo={accountInfo}
+                  onLoadHistory={async () => {
+                    const identity = await getIdentity();
+                    const actor = await createActor(identity);
+                    return await actor.get_transaction_history();
+                  }}
+                />
               </div>
 
               <div className="card">
@@ -2458,58 +2265,6 @@ function App() {
                     No transaction history yet
                   </div>
                 )}
-              </div>
-
-              <div className="card">
-                <h2>Deposit ckBTC</h2>
-                <p>Transfer ckBTC to the canister address below, then record the deposit.</p>
-                {canisterAddress && (
-                  <div className="form-group" style={{ marginBottom: '20px' }}>
-                    <label>Canister Address (Send ckBTC here):</label>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <code style={{ flex: 1, padding: '10px 12px', background: '#fafafa', border: '1px solid #e5e5e5', wordBreak: 'break-all' }}>
-                        {canisterAddress}
-                      </code>
-                      <button
-                        onClick={() => copyToClipboard(canisterAddress)}
-                        className="btn-refresh-small"
-                        title="Copy address"
-                        style={{ padding: '10px 12px' }}
-                      >
-                        📋
-                      </button>
-                    </div>
-                    <small>Send ckBTC to this canister address from your wallet</small>
-                    {canisterAddress && (
-                      <div style={{ marginTop: '8px' }}>
-                        <a
-                          href={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(canisterAddress)}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ fontSize: '0.85rem', color: '#1a1a1a', textDecoration: 'underline' }}
-                        >
-                          📱 Show QR Code
-                        </a>
-                      </div>
-                    )}
-                  </div>
-                )}
-                <form onSubmit={handleDeposit}>
-                  <div className="form-group">
-                    <label>Amount (smallest unit, 8 decimals)</label>
-                    <input
-                      type="number"
-                      value={depositAmount}
-                      onChange={(e) => setDepositAmount(e.target.value)}
-                      placeholder="1000000 = 0.01 ckBTC"
-                      required
-                    />
-                    <small>Enter the amount you transferred (e.g., 1000000 = 0.01 ckBTC)</small>
-                  </div>
-                  <button type="submit" className="btn btn-primary" disabled={loading}>
-                    {loading ? 'Processing...' : 'Record Deposit'}
-                  </button>
-                </form>
               </div>
             </>
           )}

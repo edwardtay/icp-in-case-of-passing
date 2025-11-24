@@ -249,20 +249,17 @@ export async function connectInternetIdentity() {
     }
     
     // If not logged in, show login prompt
-    // Use production identity provider by default for better reliability
-    // Only use localhost if explicitly configured and available
+    // Use local Internet Identity for local development, production for mainnet
     let identityProvider = 'https://identity.ic0.app';
     
-    // Check if we should use local identity provider
-    if (import.meta.env.DEV && import.meta.env.VITE_USE_LOCAL_II === 'true') {
-      // Try to detect if local DFX is running
-      try {
-        const response = await fetch('http://localhost:4943', { method: 'HEAD', mode: 'no-cors' });
-        identityProvider = `http://localhost:4943?canisterId=${import.meta.env.VITE_CANISTER_ID || 'rdmx6-jaaaa-aaaaa-aaadq-cai'}`;
-      } catch (e) {
-        // Local DFX not running, use production
-        console.log('Local DFX not detected, using production Internet Identity');
-      }
+    // For local development, use local Internet Identity
+    if (import.meta.env.DEV) {
+      const LOCAL_II_CANISTER_ID = 'uzt4z-lp777-77774-qaabq-cai';
+      // Use the proper format for local Internet Identity
+      identityProvider = `http://${LOCAL_II_CANISTER_ID}.localhost:4943`;
+      console.log('Using local Internet Identity for development:', identityProvider);
+    } else {
+      console.log('Using production Internet Identity');
     }
     
     console.log('Internet Identity: Starting login flow', { identityProvider });

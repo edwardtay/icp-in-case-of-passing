@@ -29,12 +29,34 @@ This canister implements a "dead man switch" mechanism for Bitcoin funds on ICP 
 - `UserAccount`: Stores user principal, last heartbeat timestamp, timeout duration, beneficiary, and balance
 - `DeadManSwitchState`: Manages all user accounts and ckBTC ledger canister ID
 
+## Quick Start
+
+For detailed setup instructions, see [workflow.md](./workflow.md).
+
+### Automated Setup
+
+```bash
+# Run the setup script (installs dependencies, builds, and deploys)
+./scripts/setup-local-dev.sh
+
+# Verify canister is working
+./scripts/verify-canister.sh
+
+# Start frontend development server
+cd frontend && npm run dev
+```
+
+### Manual Setup
+
+See [workflow.md](./workflow.md) for step-by-step manual setup instructions.
+
 ## Setup
 
 ### Prerequisites
 
 - [DFX SDK](https://internetcomputer.org/docs/current/developer-docs/setup/install/) installed
 - Rust toolchain with `wasm32-unknown-unknown` target
+- Node.js 18+ (for frontend development)
 
 ### About ICP Development and Testing
 
@@ -177,12 +199,14 @@ dfx canister call deadman_switch get_ckbtc_balance
 
 ## Development
 
+For detailed development workflow, see [workflow.md](./workflow.md).
+
 ### Building
 
 The canister is compiled to **WebAssembly (Wasm) bytecode**, which is what runs on the Internet Computer:
 
 ```bash
-dfx build
+dfx build deadman_switch
 ```
 
 This compiles the Rust code to Wasm bytecode that can be deployed as a canister smart contract.
@@ -196,9 +220,12 @@ Since ICP doesn't have a public testnet, all development and testing happens on 
 dfx start --background
 
 # Deploy to local network
-dfx deploy
+dfx deploy deadman_switch
 
-# Test functions
+# Verify canister is working
+./scripts/verify-canister.sh
+
+# Test functions manually
 dfx canister call deadman_switch greet '("World")'
 ```
 
@@ -224,6 +251,11 @@ dfx canister logs deadman_switch
 icp-btc-cursor/
 ├── dfx.json                 # DFX configuration
 ├── Cargo.toml              # Workspace Cargo configuration
+├── workflow.md             # Development workflow guide
+├── scripts/
+│   ├── setup-local-dev.sh  # Automated setup script
+│   ├── verify-canister.sh  # Canister verification script
+│   └── quick-start.sh      # Quick start script
 ├── deadman_switch/
 │   ├── Cargo.toml          # Canister dependencies
 │   └── src/
@@ -231,7 +263,6 @@ icp-btc-cursor/
 │       └── deadman_switch.did  # Candid interface
 ├── frontend/               # Frontend application
 ├── examples/               # Usage examples
-├── DEPLOYMENT.md           # Deployment guide
 └── README.md               # This file
 ```
 
@@ -239,12 +270,40 @@ icp-btc-cursor/
 
 This project is designed for the [ICP Bitcoin DeFi Hackathon](https://www.encodeclub.com/programmes/icp-bitcoin-defi-hackathon).
 
+### 🚀 Quick Demo
+
+```bash
+# One command to start everything
+./demo.sh
+
+# Then open http://localhost:5173
+# See DEMO.md for demo script
+```
+
 ### Key Innovation Points
 
 1. **Automated Asset Management**: Ensures funds are not lost if user becomes inactive
 2. **ckBTC Integration**: Leverages ICP's native Bitcoin integration
 3. **Decentralized**: Fully on-chain, no centralized control
 4. **ICRC-1 Compliant**: Uses standard token interfaces
+
+### MVP Status
+
+**✅ Complete:**
+- User registration with timeout and beneficiary
+- Heartbeat mechanism with countdown timer
+- Automatic timeout detection
+- Account dashboard
+- Transaction history
+- Frontend UI
+
+**🚧 Work In Progress (WIP):**
+- ckBTC transfers (requires testnet deployment)
+- Multiple beneficiaries (architecture ready, UI pending)
+- Trusted party override (data structures ready)
+- Mobile app (future enhancement)
+
+See [HACKATHON_MVP.md](./HACKATHON_MVP.md) for complete MVP checklist.
 
 ## License
 

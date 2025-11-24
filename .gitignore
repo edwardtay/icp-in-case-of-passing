@@ -43,6 +43,10 @@ build/
 
 # Personal/Private files (not for GitHub)
 private/
+# Keep private folder structure but ignore contents
+private/docs/
+private/scripts/
+private/troubleshooting/
 
 # Temporary files
 *.tmp

@@ -1,3 +1,4 @@
+import './polyfills'; // Must be first - fixes "global is not defined" error
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';

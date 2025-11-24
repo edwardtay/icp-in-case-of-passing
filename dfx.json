@@ -1,6 +1,12 @@
 {
   "version": 1,
   "canisters": {
+    "internet_identity": {
+      "type": "custom",
+      "candid": "https://github.com/dfinity/internet-identity/releases/download/release-2025-11-21/internet_identity.did",
+      "wasm": "https://github.com/dfinity/internet-identity/releases/download/release-2025-11-21/internet_identity_dev.wasm.gz",
+      "init_arg": "(null)"
+    },
     "deadman_switch": {
       "type": "rust",
       "package": "deadman_switch",
